@@ -1,0 +1,5 @@
+# Runtime dependency for dsviper-database-tools.
+
+# dsviper runtime + Python binding. >= 1.2.20 for ValueXArray.rebuild_from,
+# which the XArray rewrite path relies on.
+dsviper>=1.2.20
