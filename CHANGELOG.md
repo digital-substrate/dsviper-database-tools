@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.2.0] - 2026-07-17
+
+Beta. The engine and both migration loops are feature-complete and self-verifying, proven on
+real data at industrial scale. This closes 0.1.0's known gaps (`CommitDatabase` migration,
+`Vec`/`Mat` element conversion, Class-C hooks).
+
+- **Engine** — the full type / directive surface: renames, shape changes, retypes (leaf, all
+  container elements, `Vec`/`Mat` element + dimension, the `Vector` bridge, variant arm-sets),
+  definition-level drops, namespace split / merge, and Class-C hooks (cross-field, cross-document
+  single-reference, aggregate). Total-or-explicit-refusal throughout.
+- **`Database` migration** — one exclusive transaction, **copy-on-reference** blob streaming (no
+  orphan sweep), a source snapshot, `on_progress`, and a self-`verify`; rolls back on any failure
+  and discards a partial target. Adds `dry_run` (the *inform* preview) and `plan` (the static
+  *identify* report).
+- **`CommitDatabase` migration** — faithful DAG replay (history + merges preserved) over all ten
+  opcode verbs, now with an **opcode-level `verify`** (each opcode's rewrite + the DAG topology,
+  not a re-materialised snapshot), a `dry_run`, and progress. `drop_attachment` is admissible;
+  record-scoped loss (`drop-record`) is refused. The `--verify` CLI flag now covers it.
+- **Docs** — a [migration guide](MIGRATION_GUIDE.md) (how to think) and [REWRITE.md](REWRITE.md)
+  (maintainer, code-linked); `ARCHITECTURE.md` retired, its durable content folded into REWRITE.
+
+Requires `dsviper >= 1.2.20`.
+
 ## [0.1.0] - 2026-07-13
 
 First cut. Definitions-directed document rewriting + database migration in pure

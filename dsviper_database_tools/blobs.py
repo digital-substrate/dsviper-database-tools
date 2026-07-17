@@ -10,9 +10,11 @@ expose `create_zero_blob` / `write_blob` / `freeze_blob`).
 _CHUNK = 64 * 1024 * 1024        # stream large blobs, never materialised whole
 
 
-def copy_blob(source, target_databasing, blob_id):
+def copy_blob(source, target_databasing, blob_id, on_bytes=None):
     """Stream one blob's bytes source → target, preserving its id. Returns True if
-    copied, False if the source lacks it (an incoherent reference — skipped)."""
+    copied, False if the source lacks it (an incoherent reference — skipped). `on_bytes`,
+    if given, is called with each chunk's byte count as it is written — so a caller can
+    show byte-level progress even through a single multi-gigabyte blob."""
     info = source.blob_info(blob_id)
     if info is None:
         return False
@@ -23,10 +25,7 @@ def copy_blob(source, target_databasing, blob_id):
         chunk = min(_CHUNK, size - offset)
         target_databasing.write_blob(blob_id, source.read_blob(blob_id, chunk, offset), offset)
         offset += chunk
+        if on_bytes is not None:
+            on_bytes(chunk)
     target_databasing.freeze_blob(blob_id)
     return True
-
-
-def copy_blobs(source, target_databasing, blob_ids):
-    """Stream a set of blobs; returns the count actually copied."""
-    return sum(copy_blob(source, target_databasing, b) for b in blob_ids)

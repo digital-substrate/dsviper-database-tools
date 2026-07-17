@@ -17,7 +17,7 @@ import sys
 
 import dsviper as V
 
-from dsviper_database_tools import run_migration, run_commit_migration
+from dsviper_database_tools import migrate_database, migrate_commit_database
 
 
 def load_build_directives(path):
@@ -45,7 +45,7 @@ def main():
     parser.add_argument("source", help="path to the source Database / CommitDatabase (read-only)")
     parser.add_argument("target", help="path of the fresh target to write")
     parser.add_argument("--verify", action="store_true",
-                        help="prove the target is a faithful image (Database only)")
+                        help="prove the target is a faithful image of the source")
     parser.add_argument("--force", action="store_true", help="overwrite the target if it exists")
     parser.add_argument("-v", "--verbose", action="store_true", help="print the migration summary")
     args = parser.parse_args()
@@ -63,12 +63,9 @@ def main():
 
     build_directives = load_build_directives(os.path.expanduser(args.migration))
     if V.CommitDatabase.is_compatible(source):
-        if args.verify:
-            print("note: --verify is not yet supported for a CommitDatabase (ignored).",
-                  file=sys.stderr)
-        info = run_commit_migration(source, build_directives, target)
+        info = migrate_commit_database.run(source, build_directives, target, verify=args.verify)
     elif V.Database.is_compatible(source):
-        info = run_migration(source, build_directives, target, verify=args.verify)
+        info = migrate_database.run(source, build_directives, target, verify=args.verify)
     else:
         print(f"Not a dsviper Database or CommitDatabase: {source}", file=sys.stderr)
         sys.exit(1)

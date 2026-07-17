@@ -17,13 +17,15 @@ The package is a *composition of runtime atoms* — it consumes the public `dsvi
 API and adds no C++. Keep it that way: if something seems to need a binding change,
 that belongs in the runtime/binding, not here.
 
-- **Engine** (`rewrite.py`) — the target-directed `value()` and the
-  `build_target_definitions` pass. No I/O.
-- **Migration** (`migrate.py`) — the `Database` read-old / write-new loop.
-- **Directives** (`directives.py`) — pure data; the declarative edit script.
-- **Verify** (`verify.py`) — the round-trip self-check.
+- **Kernel** (`rewrite/`) — the pure, format-agnostic core: the engine
+  (`rewrite/engine.py`: target-directed `value()` + `build_target_definitions`) and its
+  declarative edit script (`rewrite/directives.py`). No I/O, no store, no format.
+- **Database** (`migrate_database.py`) — silo 2: the `migrate` loop, its `verify`
+  self-check, and the `run` entry point.
+- **CommitDatabase** (`migrate_commit_database.py`) — silo 3: the faithful DAG replay
+  `migrate`, its `verify` self-check, and the `run` entry point.
 - **Tool** (`database_migrate.py`, at the repo root) — the command-line entry point;
-  loads a migration file and calls `run_migration`.
+  loads a migration file and calls `migrate_database.run` / `migrate_commit_database.run`.
 
 ## No silent loss
 
