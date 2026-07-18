@@ -1711,6 +1711,16 @@ class TestHolderElementRetype(unittest.TestCase):
         t2 = out2.at("f", encoded=False)
         self.assertEqual((2 ** 31 - 1, "b"), (t2.at(0, encoded=True), t2.at(1, encoded=True)))
 
+    def test_tuple_arity_change_refused(self):
+        # policy only to clear the build-time policy gate; the value-time guard then refuses the
+        # arity change itself (a tuple conversion is per-position — it cannot add/drop positions).
+        rw, _t, s = self._mk(V.TypeTuple([T.INT32, T.STRING]), V.TypeTuple([T.INT32]), policy="saturate")
+        with self.assertRaises(ValueError) as cm:
+            rw.value(V.ValueStructure(
+                s, {"f": V.ValueTuple(V.TypeTuple([T.INT32, T.STRING]),
+                                      [V.Value.create(T.INT32, 5), V.ValueString("a")])}))
+        self.assertIn("arity", str(cm.exception))
+
     def test_nested_vector_of_optional_narrow_policied(self):
         O64, O32 = V.TypeOptional(T.INT64), V.TypeOptional(T.INT32)
         rw, _t, s = self._mk(V.TypeVector(O64), V.TypeVector(O32), policy="saturate")

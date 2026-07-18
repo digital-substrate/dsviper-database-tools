@@ -469,6 +469,67 @@ class DefinitionsRewriter:
         else:
             out.set(nk, nv)
 
+    # -- the SINGLE container/holder traversal — the one place that knows the container/holder
+    #    kinds (optional / vector / set / map / xarray / tuple). Rebuilds `tt` by applying
+    #    `elem_fn(element, element_type, site) -> converted` to each element. `elem_fn` is either
+    #    `value`'s type-preserving recurse or `_retype`'s policied `_retype_element`; sharing one
+    #    loop keeps the two from drifting (the very drift that opened the earlier Optional/Tuple
+    #    gap — value() had them, _retype()'s hand-kept copy did not). Set-collapse / map-collision
+    #    are guarded here, uniformly for both callers. Returns None if `tt` is not one of the six
+    #    (the caller handles struct / key / any / enum / variant / commit_id / leaf). Vec/Mat are
+    #    NOT here (numeric, cell-addressed, retype-only) nor is variant (arm-set semantics).
+    def _map_elements(self, v, tt, elem_fn, site):
+        tc = tt.type_code()
+        if tc == "optional":
+            vo = V.ValueOptional.cast(v)
+            if vo.is_nil():
+                return V.ValueOptional(tt)
+            et = V.TypeOptional.cast(tt).element_type()
+            return V.ValueOptional(tt, elem_fn(vo.unwrap(encoded=False), et, site))
+        if tc == "vector":
+            vv = V.ValueVector.cast(v)
+            et = V.TypeVector.cast(tt).element_type()
+            out = V.ValueVector(tt)
+            esite = self._sub(site, "[]")
+            for i in range(vv.size()):
+                out.append(elem_fn(vv.at(i, encoded=False), et, esite))
+            return out
+        if tc == "set":
+            vs = V.ValueSet.cast(v)
+            et = V.TypeSet.cast(tt).element_type()
+            out = V.ValueSet(tt)
+            esite = self._sub(site, "{}")
+            for i in range(vs.size()):
+                self._set_add(out, elem_fn(vs.at(i, encoded=False), et, esite), site)
+            return out
+        if tc == "map":
+            mt = V.TypeMap.cast(tt)
+            kt, et = mt.key_type(), mt.element_type()
+            vm = V.ValueMap.cast(v)
+            out = V.ValueMap(tt)
+            ksite, vsite = self._sub(site, "<key>"), self._sub(site, "<val>")
+            for k, val in vm.items(encoded=False):
+                self._map_set(out, elem_fn(k, kt, ksite), elem_fn(val, et, vsite), site)
+            return out
+        if tc == "xarray":
+            # ATOMIC: the source layout (positions + tombstones) is copied opaquely inside
+            # rebuild_from, and the re-mapped elements are installed in the SAME step.
+            vx = V.ValueXArray.cast(v)
+            et = V.TypeXArray.cast(tt).element_type()
+            esite = self._sub(site, "[]")
+            out = V.ValueXArray(tt)
+            out.rebuild_from(vx, [(pos, elem_fn(val, et, esite)) for pos, val in vx.items(encoded=False)])
+            return out
+        if tc == "tuple":
+            vt = V.ValueTuple.cast(v)
+            ets = V.TypeTuple.cast(tt).types()
+            if vt.size() != len(ets):                              # a tuple conversion is per-position;
+                raise ValueError(f"[unsupported] tuple arity change {vt.size()}→{len(ets)} — a tuple "
+                                 f"conversion must preserve arity (it is a per-position element conversion)")
+            return V.ValueTuple(tt, [elem_fn(vt.at(i, encoded=False), ets[i], self._sub(site, f".{i}"))
+                                     for i in range(vt.size())])
+        return None
+
     # -- retype dispatcher: structural (unwrap, Vector→Set) + leaf (widen/narrow/
     #    format/parse). Class A converts automatically; Class B consults the policy
     #    ONLY on the offending value — in-domain values always convert exactly.
@@ -490,20 +551,6 @@ class DefinitionsRewriter:
             if inner.type_code() == tc:
                 return self.value(inner, tt, site)
             return self._retype(inner, tt, policy, site)
-        if sc == "optional" and tc == "optional":                  # Optional<A> → Optional<B>: element
-            vo = V.ValueOptional.cast(sv)                          # retype, nil-preserving (a nil holds no
-            if vo.is_nil():                                        # element to convert). The inner A→B
-                return V.ValueOptional(tt)                        # rides _retype_element — a leaf narrow is
-            et = V.TypeOptional.cast(tt).element_type()           # policied, a nested holder recurses.
-            return V.ValueOptional(tt, self._retype_element(vo.unwrap(encoded=False), et, policy, site))
-        if sc == "tuple" and tc == "tuple":                        # Tuple<...> → Tuple<...>: per-position
-            vt = V.ValueTuple.cast(sv)                             # element retype at fixed arity (each
-            ets = V.TypeTuple.cast(tt).types()                    # position rides _retype_element).
-            if vt.size() != len(ets):
-                raise ValueError(f"[unsupported] tuple arity change {vt.size()}→{len(ets)} — a tuple "
-                                 f"retype must preserve arity (it is a per-position element conversion)")
-            return V.ValueTuple(tt, [self._retype_element(vt.at(i, encoded=False), ets[i], policy,
-                                                          self._sub(site, f".{i}")) for i in range(len(ets))])
         if sc == "vector" and tc == "set":                         # Vector → Set (collapse)
             et = V.TypeSet.cast(tt).element_type()
             out = V.ValueSet(tt)
@@ -609,44 +656,18 @@ class DefinitionsRewriter:
                     out.set(c, r, V.Value.dumps(conv))
             return out
 
-        # container element retype (same container kind, element type widen A / narrow B) — the
-        # retype twin of value()'s container branches: each element rides `_retype_element` (the
-        # policy-governed leaf path), the container shape is preserved. A same-shape narrow that
-        # makes two elements collide is the Class-B non-injective loss value() already guards.
-        if sc == "vector" and tc == "vector":
-            te = V.TypeVector.cast(tt).element_type()
-            vv = V.ValueVector.cast(sv)
-            out = V.ValueVector(tt)
-            esite = self._sub(site, "[]")
-            for i in range(vv.size()):
-                out.append(self._retype_element(vv.at(i, encoded=False), te, policy, esite))
-            return out
-        if sc == "set" and tc == "set":
-            te = V.TypeSet.cast(tt).element_type()
-            vs = V.ValueSet.cast(sv)
-            out = V.ValueSet(tt)
-            esite = self._sub(site, "{}")
-            for i in range(vs.size()):
-                self._set_add(out, self._retype_element(vs.at(i, encoded=False), te, policy, esite), site)
-            return out
-        if sc == "xarray" and tc == "xarray":              # positions + tombstones preserved atomically
-            te = V.TypeXArray.cast(tt).element_type()
-            vx = V.ValueXArray.cast(sv)
-            esite = self._sub(site, "[]")
-            out = V.ValueXArray(tt)
-            out.rebuild_from(vx, [(pos, self._retype_element(val, te, policy, esite))
-                                  for pos, val in vx.items(encoded=False)])
-            return out
-        if sc == "map" and tc == "map":                    # element and/or key retype
-            mt = V.TypeMap.cast(tt)
-            kt, te = mt.key_type(), mt.element_type()
-            vm = V.ValueMap.cast(sv)
-            out = V.ValueMap(tt)
-            ksite, vsite = self._sub(site, "<key>"), self._sub(site, "<val>")
-            for k, val in vm.items(encoded=False):
-                self._map_set(out, self._retype_element(k, kt, policy, ksite),
-                              self._retype_element(val, te, policy, vsite), site)
-            return out
+        # Same-kind container / holder element retype (optional / vector / set / map / xarray /
+        # tuple; element widen A / narrow B) — the retype twin of value()'s traversal, through the
+        # SAME `_map_elements` loop, so the two can never drift (the drift that opened the earlier
+        # Optional/Tuple gap). Each element rides `_retype_element` (the policy-governed leaf path);
+        # the container shape is preserved. A same-shape narrow that collides two elements is the
+        # Class-B non-injective loss `_set_add` / `_map_set` guard. Guarded `sc == tc`: a cross-kind
+        # pair (all bridged above) must NOT reach `_map_elements`, which dispatches on the target.
+        if sc == tc:
+            mapped = self._map_elements(
+                sv, tt, lambda e, et, s: self._retype_element(e, et, policy, s), site)
+            if mapped is not None:
+                return mapped
 
         # -- leaf: a scalar↔scalar conversion from here on. Any COMPOSITE reaching this point has
         #    no conversion branch above — fail CLOSED (invariant #1), never the numeric tail's crash
@@ -927,64 +948,17 @@ class DefinitionsRewriter:
                 name = self.d.case_renames.get(erepr, {}).get(name, name)
             return V.ValueEnumeration(V.TypeEnumeration.cast(tt), name)
 
-        if tc == "optional":
-            vo = V.ValueOptional.cast(v)
-            et = V.TypeOptional.cast(tt).element_type()
-            if vo.is_nil():
-                return V.ValueOptional(tt)
-            return V.ValueOptional(tt, self.value(vo.unwrap(encoded=False), et, site))
-
-        if tc == "vector":
-            vv = V.ValueVector.cast(v)
-            et = V.TypeVector.cast(tt).element_type()
-            out = V.ValueVector(tt)
-            esite = self._sub(site, "[]")
-            for i in range(vv.size()):
-                out.append(self.value(vv.at(i, encoded=False), et, esite))
-            return out
-
-        if tc == "set":
-            vs = V.ValueSet.cast(v)
-            et = V.TypeSet.cast(tt).element_type()
-            out = V.ValueSet(tt)
-            esite = self._sub(site, "{}")
-            for i in range(vs.size()):
-                self._set_add(out, self.value(vs.at(i, encoded=False), et, esite), site)
-            return out
-
-        if tc == "map":
-            vm = V.ValueMap.cast(v)
-            mt = V.TypeMap.cast(tt)
-            kt, et = mt.key_type(), mt.element_type()
-            out = V.ValueMap(tt)
-            ksite, vsite = self._sub(site, "<key>"), self._sub(site, "<val>")
-            for k, val in vm.items(encoded=False):
-                self._map_set(out, self.value(k, kt, ksite), self.value(val, et, vsite), site)
-            return out
-
-        if tc == "tuple":
-            vt = V.ValueTuple.cast(v)
-            ets = V.TypeTuple.cast(tt).types()
-            return V.ValueTuple(tt, [self.value(vt.at(i, encoded=False), ets[i], self._sub(site, f".{i}"))
-                                     for i in range(vt.size())])
+        # Container / holder kinds (optional / vector / set / map / xarray / tuple) — one shared
+        # traversal, so `value` and `_retype`'s same-kind element retype stay in lockstep.
+        mapped = self._map_elements(v, tt, lambda e, et, s: self.value(e, et, s), site)
+        if mapped is not None:
+            return mapped
 
         if tc == "variant":
             vv = V.ValueVariant.cast(v)
             inner = self.value(vv.unwrap(encoded=False), None, site)
             out = V.ValueVariant(tt)
             out.wrap(inner, inner.type())
-            return out
-
-        if tc == "xarray":
-            # Trans-definitions (de)serialization of the XArray, ATOMIC: source's
-            # layout (positions + tombstones) is copied opaquely inside rebuild_from,
-            # and the elements — re-mapped to the target domain here — are installed in
-            # the SAME step. `out` never passes through a partial state.
-            vx = V.ValueXArray.cast(v)
-            et = V.TypeXArray.cast(tt).element_type()
-            esite = self._sub(site, "[]")
-            out = V.ValueXArray(tt)
-            out.rebuild_from(vx, [(pos, self.value(val, et, esite)) for pos, val in vx.items(encoded=False)])
             return out
 
         if tc == "commit_id" and self._commit_id_remap is not None:
