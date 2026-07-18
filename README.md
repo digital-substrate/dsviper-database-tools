@@ -138,7 +138,7 @@ explains the loss model and when to reach for each; this section is the exact re
 | `add_field(struct, name, type, derive=fn)` | add a field **derived** from the struct — `fn(source_struct, field_name, target_type)` | C |
 | `drop_field(struct, name)` | remove a field | A |
 | `reorder_fields(struct, order)` | set the target field order (a permutation of the field names) | A |
-| `retype_field(struct, name, new_type, policy=None)` | change a field's type (leaf, `Set`/`Vector`/`Map`/`XArray` element, `Vec`/`Mat` element, variant arm-set, the `Vec`↔`Vector` bridge); `policy` required when lossy | A / B |
+| `retype_field(struct, name, new_type, policy=None)` | change a field's type (leaf, `Set`/`Vector`/`Map`/`XArray`/`Optional`/`Tuple` element, `Vec`/`Mat` element, variant arm-set, the `Vec`↔`Vector` bridge); `policy` required when lossy | A / B |
 
 **`Vec` / `Mat` dimension** (named explicitly — never inferred from a target shape):
 
@@ -193,7 +193,7 @@ its loss model; the engine validates its output against the target type:
 converts in-range / parseable / non-nil values exactly, and applies the policy only to the
 offenders; the *why* is the guide's §3):
 
-- numeric narrowing (incl. `Set`/`Vector`/`Map`/`XArray` and `Vec`/`Mat` element) → `"fail"` (default) / `"saturate"` / `("default", value)`
+- numeric narrowing (incl. `Set`/`Vector`/`Map`/`XArray`/`Optional`/`Tuple` and `Vec`/`Mat` element) → `"fail"` (default) / `"saturate"` / `("default", value)`
 - parse `string→X` → `"fail"` / `("default", value)` / `"drop-record"`
 - `Optional<A>→A` on nil → `"fail"` / `("default", value)` / `"drop-record"`
 - remove a populated enum case / variant arm → `"fail"` / `("map-case", name)` / `"drop-record"`
