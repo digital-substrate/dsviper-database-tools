@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.2] - 2026-07-18
+
+Two fixes surfaced by the engine ↔ `REWRITE.md` review.
+
+- **`plan` was out of sync with the engine.** A same-kind element retype
+  (`Set`/`Vector`/`Map`/`XArray`/`Optional`/`Tuple` `<A>→<B>`) was classified `B (review)` and
+  warned "missing policy" even for a lossless **widening** — but the engine treats it as Class A.
+  `plan` now calls the engine's own `_container_element_retype_class`, so the *identify* surface
+  matches what the engine actually does (no more false "missing policy" for an element widening).
+- **The CLI now exposes the whole decision loop.** `database_migrate.py` gained `--plan` (identify)
+  and `--dry-run` (inform) — both read-only, print-and-exit; the target is optional when either is
+  used. Previously only `--verify` (decide) was reachable from the command line.
+
 ## [0.2.1] - 2026-07-18
 
 Bugfix. A field `retype_field` between two **composite** types the engine holds crashed in the

@@ -17,7 +17,8 @@ and Class-C will extend. Format-agnostic like the engine — the report is plain
 
 import dsviper as V
 
-from .engine import WIDENING, INT_RANGE, _const, _vecmat_retype_class
+from .engine import (WIDENING, INT_RANGE, _const, _vecmat_retype_class,
+                     _container_element_retype_class)
 
 _FLOATS = {"float", "double"}
 _INTS = set(INT_RANGE)
@@ -30,6 +31,10 @@ def _classify_retype(src_type, new_type):
     if vm is not None:
         return vm
     sc, tc = src_type.type_code(), new_type.type_code()
+    ce = _container_element_retype_class(src_type, new_type)   # same-kind element retype of a container
+    if ce is not None:                                         # (set/vector/map/xarray) or holder (optional/tuple)
+        return ce, (f"{sc} element widening (lossless)" if ce == "A"
+                    else f"{sc} element narrowing (needs a policy)")
     if sc == "variant" and tc == "variant":            # arm-set change (arms compared by repr —
         src_arms = {a.representation() for a in V.TypeVariant.cast(src_type).types()}   # approximate
         tgt_arms = {a.representation() for a in V.TypeVariant.cast(new_type).types()}   # for renamed arms

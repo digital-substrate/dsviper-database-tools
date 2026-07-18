@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dsviper-database-tools"
-version = "0.2.1"
+version = "0.2.2"
 description = "Definitions-directed document rewriting and database migration for Viper — a declarative edit script (renames + shape changes + decreed policies) and a target-directed rewrite engine, in pure Python over the dsviper binding. Rebuild Base(A) into a fresh Base(B); the source stays as rollback."
 readme = "README.md"
 requires-python = ">=3.10"

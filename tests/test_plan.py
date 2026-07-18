@@ -110,6 +110,39 @@ class TestPlanReport(unittest.TestCase):
         report = plan(defs, d)
         self.assertFalse(any("non-injective" in w for w in report["warnings"]))
 
+    def test_container_element_widen_is_class_a_no_warning(self):
+        # set<int32> → set<int64> is a lossless element WIDENING — the engine treats it as
+        # Class A (no policy). plan must agree (no false "missing policy" warning).
+        defs = V.Definitions()
+        s = struct(defs, "S", [("f", V.TypeSet(T.INT32))])
+        d = TransformationDirectives()
+        d.retype_field(s.representation(), "f", V.TypeSet(T.INT64))       # no policy
+        report = plan(defs, d)
+        rt = next(c for c in report["changes"] if c["kind"] == "retype_field")
+        self.assertEqual("A", rt["class"])
+        self.assertFalse(rt["loss"])
+        self.assertFalse(any("missing policy" in w for w in report["warnings"]))
+
+    def test_container_element_narrow_is_class_b_warns(self):
+        # set<int64> → set<int32> narrows the element — Class B, needs a policy.
+        defs = V.Definitions()
+        s = struct(defs, "S", [("f", V.TypeSet(T.INT64))])
+        d = TransformationDirectives()
+        d.retype_field(s.representation(), "f", V.TypeSet(T.INT32))       # no policy
+        report = plan(defs, d)
+        rt = next(c for c in report["changes"] if c["kind"] == "retype_field")
+        self.assertEqual("B", rt["class"])
+        self.assertTrue(any("missing policy" in w for w in report["warnings"]))
+
+    def test_optional_element_widen_is_class_a(self):
+        defs = V.Definitions()
+        s = struct(defs, "S", [("f", V.TypeOptional(T.INT32))])
+        d = TransformationDirectives()
+        d.retype_field(s.representation(), "f", V.TypeOptional(T.INT64))  # no policy
+        report = plan(defs, d)
+        rt = next(c for c in report["changes"] if c["kind"] == "retype_field")
+        self.assertEqual("A", rt["class"])
+
 
 if __name__ == "__main__":
     unittest.main()
