@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.4] - 2026-07-18
+
+Internal refactor, no behaviour change — hardening surfaced by the engine ↔ `REWRITE.md` review.
+
+- **One container traversal instead of two.** `value()` and `_retype()` each hand-maintained the
+  same six container/holder branches (`Optional` / `Vector` / `Set` / `Map` / `XArray` / `Tuple`),
+  differing only by the per-element function — and that duplication is precisely what had let the
+  `Optional` / `Tuple` element retype drift out of sync (the 0.2.1 bug). They now share one
+  `_map_elements(v, tt, elem_fn, site)` loop (`value` passes its type-preserving recurse, `_retype`
+  its policied `_retype_element`), so the two can no longer diverge. `Vec` / `Mat` (numeric,
+  cell-addressed) and `variant` (arm-set) stay separate by design; the tuple arity guard and the
+  set-collapse / map-collision guards live in the shared loop. Net −104/+88 in `engine.py`; the
+  suite is unchanged plus one test (tuple arity refused at value time).
+
 ## [0.2.3] - 2026-07-18
 
 - **`DiagnosticSink`'s `dropped` count no longer depends on `max_samples`.** It was derived from
