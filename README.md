@@ -41,9 +41,10 @@ This package gives you:
   `CommitDatabase` stores mutations, so it is each opcode's rewrite that is checked (plus the DAG
   topology), not a re-materialised snapshot; `dry_run` is the same no-write preview at the opcode
   level.
-- **`database_migrate.py`** — a root-level command-line tool: it loads a migration
-  file, opens the source read-only, and writes a fresh target — dispatching on the
-  source (`Database` or `CommitDatabase`).
+- **`database_migrate.py`** — a root-level command-line tool for the whole decision loop: it
+  loads a migration file and dispatches on the source (`Database` or `CommitDatabase`) — `--plan`
+  (identify) and `--dry-run` (inform) are read-only pre-flight; `--verify` migrates and proves the
+  result.
 
 See the **[migration guide](MIGRATION_GUIDE.md)** for how to *think* about a migration,
 and **[REWRITE.md](REWRITE.md)** for how the rewrite *works* and how to extend it — the
@@ -85,15 +86,20 @@ def build_directives(source_defs):
     return d
 ```
 
-Run it:
+Run it — the decision loop is on the command line (*identify → inform → decide*):
 
 ```bash
-python3 database_migrate.py migration_shop_v2.py old.db new.db --verify
+python3 database_migrate.py migration_shop_v2.py old.db          --plan      # identify: the static plan, no write
+python3 database_migrate.py migration_shop_v2.py old.db          --dry-run   # inform:   real loss on real data, no write
+python3 database_migrate.py migration_shop_v2.py old.db new.db   --verify    # decide:   migrate, then prove it faithful
 ```
 
-`old.db` is opened read-only and left intact; `new.db` is the rebuilt database.
-`--verify` proves the target is a faithful image, `--force` overwrites an existing
-target, `-v` prints the migration summary.
+`old.db` is opened read-only and left intact; `new.db` is the rebuilt database. `--plan`
+(schema-only, what *could* change) and `--dry-run` (which policies bite, what would drop, on the
+real data) are **read-only pre-flight** — they print and exit, so the target is omitted. `--verify`
+proves the target is a faithful image, `--force` overwrites an existing target, `-v` prints the
+migration summary. For a lossless migration, skip straight to the run; walk the earlier steps when
+it can lose data.
 
 ## The directive surface
 

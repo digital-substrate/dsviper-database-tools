@@ -223,8 +223,15 @@ Run it — the source is opened read-only, a fresh target is written, `--verify`
 python3 database_migrate.py shop_v2.py old.db new.db --verify
 ```
 
-When a migration is lossy or destructive, walk the loop (§2) from Python first — look before you
-leap:
+When a migration is lossy or destructive, walk the loop (§2) first — look before you leap. The
+quickest is the CLI itself (both steps are read-only, so the target is omitted):
+
+```bash
+python3 database_migrate.py shop_v2.py old.db --plan      # identify — what could change
+python3 database_migrate.py shop_v2.py old.db --dry-run   # inform   — what happens to the data
+```
+
+or drive the same steps from Python for finer control:
 
 ```python
 import dsviper as V
