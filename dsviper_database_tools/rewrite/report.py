@@ -34,24 +34,26 @@ class DiagnosticSink:
         rec = self._groups.get(key)
         if rec is None:
             rec = {"site": finding["site"], "op": finding["op"],
-                   "policy": finding["policy"], "count": 0, "samples": []}
+                   "policy": finding["policy"], "count": 0, "dropped": 0, "samples": []}
             self._groups[key] = rec
         rec["count"] += 1
+        if finding["after"] is None:                   # an elided value (drop-record) — count it here,
+            rec["dropped"] += 1                         # per finding, not later from the bounded samples
         if len(rec["samples"]) < self.max_samples:
             rec["samples"].append((finding["before"], finding["after"]))
 
     def report(self):
         """The aggregate, as plain serialisable data: `{"sites": [...], "summary": {...}}`.
-        Each site record is `{site, op, policy, count, samples}`; `samples` is a list of
+        Each site record is `{site, op, policy, count, dropped, samples}`; `samples` is a list of
         `(before, after)` pairs (`after` is `None` when the value was dropped/elided)."""
         sites = list(self._groups.values())
         return {
             "sites": sites,
             "summary": {
-                "findings": sum(r["count"] for r in sites),   # total offenders touched
+                "findings": sum(r["count"] for r in sites),    # total offenders touched
                 "sites": len(sites),                           # distinct (site, op) groups
-                "dropped": sum(r["count"] for r in sites       # findings that elided the value
-                               if any(a is None for _, a in r["samples"])),
+                "dropped": sum(r["dropped"] for r in sites),   # findings that elided the value —
+                                                               # counted per finding, not from the samples
             },
         }
 

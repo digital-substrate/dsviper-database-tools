@@ -317,5 +317,26 @@ class TestDryRunDiagnostics(unittest.TestCase):
         self.assertEqual("saturate", site["policy"])
 
 
+class TestDroppedCountIndependentOfSampleCap(unittest.TestCase):
+    """`dropped` counts elided values (after=None) per finding as they arrive — independent of
+    `max_samples`, so it is exact even when no samples are kept at all (`max_samples=0`)."""
+
+    def _feed(self, max_samples):
+        sink = DiagnosticSink(max_samples=max_samples)
+        sink({"site": "S.f", "op": "drop", "policy": "drop-record", "before": "x", "after": None})
+        sink({"site": "S.f", "op": "drop", "policy": "drop-record", "before": "y", "after": None})
+        sink({"site": "S.g", "op": "narrow", "policy": "saturate", "before": 99999, "after": 32767})
+        return sink.report()["summary"]
+
+    def test_dropped_counted_even_with_no_samples(self):
+        s = self._feed(0)                                  # samples cap 0 — nothing sampled
+        self.assertEqual(3, s["findings"])
+        self.assertEqual(2, s["dropped"])                  # the two elided values, still counted
+        self.assertEqual(2, s["sites"])
+
+    def test_dropped_matches_across_sample_caps(self):
+        self.assertEqual(self._feed(0)["dropped"], self._feed(5)["dropped"])
+
+
 if __name__ == "__main__":
     unittest.main()

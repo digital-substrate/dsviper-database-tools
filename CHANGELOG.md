@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3] - 2026-07-18
+
+- **`DiagnosticSink`'s `dropped` count no longer depends on `max_samples`.** It was derived from
+  the *bounded* sample list, so it read `0` with `max_samples=0` even when records were dropped. It
+  is now tracked per finding as they arrive (a counter set when a value is elided), so the count is
+  exact for any sample cap. Found by the engine ↔ `REWRITE.md` review.
+
 ## [0.2.2] - 2026-07-18
 
 Two fixes surfaced by the engine ↔ `REWRITE.md` review.
