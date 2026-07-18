@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.1] - 2026-07-18
+
+Bugfix. A field `retype_field` between two **composite** types the engine holds crashed in the
+scalar-narrowing tail (and a lossless widening of one was wrongly refused). Found by an
+engine↔`REWRITE.md` review.
+
+- `Optional<A> → Optional<B>` and `Tuple<...> → Tuple<...>` now join the same-kind **element
+  retype** family — widen (Class A, automatic) / narrow (Class B, policied), nil- and
+  position-preserving, nested-aware — the twin of the `Set`/`Vector`/`Map`/`XArray` element retype.
+- `_retype` gained a fail-closed **composite guard**: any composite retype with no conversion branch
+  (`struct↔struct`, `enum↔enum`, `key↔key`, …) is now a clean `[unsupported]` refusal
+  (total-or-explicit-refusal), never a crash — use a Class-C hook for such a change.
+- `REWRITE.md` updated: the element-retype family (now incl. the `Optional`/`Tuple` holders), the
+  composite guard, and three doc↔code precisions surfaced by the review.
+
 ## [0.2.0] - 2026-07-17
 
 Beta. The engine and both migration loops are feature-complete and self-verifying, proven on

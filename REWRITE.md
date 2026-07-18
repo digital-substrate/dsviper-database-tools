@@ -170,16 +170,21 @@ dangerous kind. Each is named and pinned to where it is enforced.
 
 **1 · Total, or an explicit refusal.** Every value becomes a valid target value, raises
 `Unrepresentable` (a record the consumer elides), or raises — never a silently wrong value.
-Enforced in two places in `rewrite/engine.py`: `DefinitionsRewriter._retype` / `.value` fail closed
-on any un-handled or un-policied case (an un-policied narrowing raises; an unhandled composite hits
-a guard instead of passing through unrewritten), and `._policy_completeness` refuses a lossy
-operation carrying no policy *up front*, before any data is touched. When you add an operation, its
-default must be refusal.
+Enforced by three fail-closed points in `rewrite/engine.py`, plus one up-front: `.value` raises on
+a composite `type_code` it has no branch for (rather than passing it through unrewritten);
+`._retype` raises on **both** an un-policied narrowing **and** a composite retype it has no
+conversion branch for (the `COMPOSITES` guard just before the scalar-leaf tail — otherwise a
+composite would crash in the numeric path); and `._policy_completeness` refuses a lossy operation
+carrying no policy *up front*, before any data is touched. When you add an operation, its default
+must be refusal — and if it is a new composite handled by `_retype`, either give it a branch or let
+the guard refuse it; never let it reach the scalar tail.
 
 **2 · Ids are born in phase 1, never patched.** Every target `runtimeId` is minted by
 `build_target_definitions` (`rewrite/engine.py`), by constructing the target definition. Phase 2
-(`value`) only *looks up* the target type through `type_map`; it never forges or edits an id. That
-is why a value can never carry a stale source id into the target — there is nowhere to patch one.
+(`value`) *rebuilds* composite target types on the fly (`map_type` — a `TypeOptional`, `TypeVector`,
+`TypeMap`, … whose id the runtime **derives** from its already-mapped components) and *looks up* the
+named target types through `type_map`; it never forges or edits an id itself. That is why a value
+can never carry a stale source id into the target — there is nowhere to patch one.
 
 **3 · A policy governs only the offenders.** An in-range number, a parseable string, a non-nil
 optional always converts *exactly*; a policy (`saturate` / `default` / …) is consulted only for the
@@ -239,16 +244,21 @@ Refusals happen up front, before any value:
 - dimension ops are validated (`_validate_dimension_ops`);
 - a `drop_type` that leaves a surviving definition pointing at the removed type is refused, with
   **every** dangling site accumulated into one report (a type-walk over the built refs), not a
-  misleading topological "cycle" or a first-error abort.
+  misleading topological "cycle" or a first-error abort;
+- a namespace **move / merge** that lands two definitions in the same target `NS::Name` slot is
+  refused, with **every** clash accumulated into one `[namespace-collision]` report — up front,
+  rather than construction rejecting the second with an opaque "already registered".
 
 Namespaces have three axes here (`tgt_ns`): the **name** (display), the **uuid** (identity), and a
 **per-definition move** (`type_namespaces`) that overrides both, for split / merge.
 
 ### Phase 2 — `value`, the target-directed walk
 
-`value(v, tt)` dispatches on the **target** `type_code`. A `transform_type`'d source type is
-intercepted at the top and handed to its hook (it rides the recursion, reaching nested
-occurrences). The **struct branch is the heart**: `_field_source` pairs each *target* field with its
+`value(v, tt)` dispatches on `v`'s `type_code` — the **source** kind, which equals the target's here
+(any shape change routes through `_retype`, so `value` is only ever called with matching kinds; the
+target-directedness is the *struct walk* over `tgt.fields()` below, not this dispatch). A
+`transform_type`'d source type is intercepted at the top and handed to its hook (it rides the
+recursion, reaching nested occurrences). The **struct branch is the heart**: `_field_source` pairs each *target* field with its
 source, and per field the walk decides —
 
 | target field is… | source | how |
@@ -266,9 +276,11 @@ commit_id, primitive — has its own branch; the container branches recurse elem
 `_set_add` / `_map_set` guarding a set-collapse / map-collision.
 
 `_retype` is the sibling of `value` for a *changed* type: the **structural** conversions (unwrap an
-`Optional`, the `Set`↔`Vector` / `Vector`↔`XArray` / `Vec`↔`Vector` bridges, a **container element
-retype**, a variant arm-set change) and the **leaf** conversions (widen, `→string`, parse, narrow,
-`float→int`). A Class-B branch consults its policy only on the offender (invariant #3).
+`Optional`, the `Set`↔`Vector` / `Vector`↔`XArray` / `Vec`↔`Vector` bridges, a **same-kind element
+retype** — of a `Set`/`Vector`/`Map`/`XArray` container *or* an `Optional`/`Tuple` holder — and a
+variant arm-set change) and the **leaf** conversions (widen, `→string`, parse, narrow, `float→int`).
+A Class-B branch consults its policy only on the offender (invariant #3). Any composite that reaches
+the leaf tail with no branch is refused by the `COMPOSITES` guard (invariant #1) — never crashed.
 
 ### The leaves that need care
 
@@ -290,10 +302,13 @@ Most branches are a plain recurse. These are the ones where a naïve "just copy 
   content-addressed and stable across stores, so it passes through. A `commit_id` is remapped to its
   re-issued target **only** when `_commit_id_remap` is installed (the CommitDatabase replay wires
   it); a Database migration, or an external cross-base id, keeps it verbatim.
-- **container element retype — per element, policied, nested.** `Set` / `Vector` / `Map` / `XArray`
-  `<A> → <B>` runs each element through `_retype_element` (the policy-governed leaf path), guarding a
+- **same-kind element retype — per element, policied, nested.** A `Set` / `Vector` / `Map` / `XArray`
+  container *or* an `Optional` / `Tuple` holder `<A> → <B>` runs each element through
+  `_retype_element` (the policy-governed leaf path), nil- and position-preserving, guarding a
   post-narrow set-collapse / map-collision; `_container_element_retype_class` classifies it (widen A
-  / narrow B), and it recurses for nested containers.
+  / narrow B) and recurses for nested containers/holders. A composite retype with **no** such branch
+  (`struct↔struct`, `enum↔enum`, `key↔key`, …) is refused by the `COMPOSITES` guard, not crashed —
+  use a Class-C hook.
 
 ---
 

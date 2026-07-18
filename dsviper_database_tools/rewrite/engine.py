@@ -106,6 +106,11 @@ INT_RANGE = {
     "uint32": (0, 2**32 - 1), "uint64": (0, 2**64 - 1),
 }
 FLOATS = {"float", "double"}
+# composite (non-scalar) kinds. A retype among these is expressed by a structural branch in
+# `_retype`; one that reaches the scalar-leaf tail unhandled fails CLOSED (invariant #1) rather
+# than crashing in the numeric path (which assumes a scalar operand).
+COMPOSITES = {"struct", "enum", "concept", "club", "optional", "vector", "set", "map",
+              "xarray", "tuple", "variant", "key", "any"}
 
 
 def _vecmat_retype_class(src_type, new_type):
@@ -173,14 +178,14 @@ def _vecmat_retype_class(src_type, new_type):
 
 
 def _container_element_retype_class(src_type, new_type):
-    """Class of a **same-container-kind** element retype — `set/vector/xarray/map` whose element
-    (and, for a map, key) type changes: widen / format / same-kind → **A** (lossless, automatic),
-    a narrowing element → **B** (needs a policy). Recurses for nested containers; a `map` weighs
-    both key and value (either narrowing ⇒ B). Returns `"A"` / `"B"`, or `None` if `src_type →
-    new_type` is not a same-kind container retype (a container *shape* change like `set→vector`, or
-    a leaf, is classified elsewhere)."""
+    """Class of a **same-kind element retype** — `set/vector/xarray/map` (containers) or `optional`
+    (the multiplicity-1 holder) whose element (and, for a map, key) type changes: widen / format /
+    same-kind → **A** (lossless, automatic), a narrowing element → **B** (needs a policy). Recurses
+    for nested containers/holders; a `map` weighs both key and value (either narrowing ⇒ B). Returns
+    `"A"` / `"B"`, or `None` if `src_type → new_type` is not a same-kind element retype (a *shape*
+    change like `set→vector` or `Optional<A>→A`, or a leaf, is classified elsewhere)."""
     sc, tc = src_type.type_code(), new_type.type_code()
-    if sc != tc or sc not in ("set", "vector", "xarray", "map"):
+    if sc != tc or sc not in ("set", "vector", "xarray", "map", "optional", "tuple"):
         return None
 
     def elem_class(se, te):
@@ -196,7 +201,12 @@ def _container_element_retype_class(src_type, new_type):
         sm, tm = V.TypeMap.cast(src_type), V.TypeMap.cast(new_type)
         return "B" if "B" in (elem_class(sm.key_type(), tm.key_type()),
                               elem_class(sm.element_type(), tm.element_type())) else "A"
-    getter = {"set": V.TypeSet, "vector": V.TypeVector, "xarray": V.TypeXArray}[sc]
+    if sc == "tuple":                                          # fixed arity — classify every position
+        st, ts = V.TypeTuple.cast(src_type).types(), V.TypeTuple.cast(new_type).types()
+        if len(st) != len(ts):
+            return None                                        # an arity change is a shape change, not this
+        return "B" if any(elem_class(a, b) == "B" for a, b in zip(st, ts)) else "A"
+    getter = {"set": V.TypeSet, "vector": V.TypeVector, "xarray": V.TypeXArray, "optional": V.TypeOptional}[sc]
     return elem_class(getter.cast(src_type).element_type(), getter.cast(new_type).element_type())
 
 
@@ -427,7 +437,7 @@ class DefinitionsRewriter:
         `value` (a plain rewrite / composite descent) — the same split as the Optional unwrap."""
         if elem.type_code() != te.type_code():
             return self._retype(elem, te, policy, esite)
-        if (te.type_code() in ("set", "vector", "xarray", "map", "vec", "mat")
+        if (te.type_code() in ("set", "vector", "xarray", "map", "vec", "mat", "optional", "tuple")
                 and elem.type().runtime_id().representation() != te.runtime_id().representation()):
             return self._retype(elem, te, policy, esite)
         return self.value(elem, te, esite)
@@ -480,6 +490,20 @@ class DefinitionsRewriter:
             if inner.type_code() == tc:
                 return self.value(inner, tt, site)
             return self._retype(inner, tt, policy, site)
+        if sc == "optional" and tc == "optional":                  # Optional<A> → Optional<B>: element
+            vo = V.ValueOptional.cast(sv)                          # retype, nil-preserving (a nil holds no
+            if vo.is_nil():                                        # element to convert). The inner A→B
+                return V.ValueOptional(tt)                        # rides _retype_element — a leaf narrow is
+            et = V.TypeOptional.cast(tt).element_type()           # policied, a nested holder recurses.
+            return V.ValueOptional(tt, self._retype_element(vo.unwrap(encoded=False), et, policy, site))
+        if sc == "tuple" and tc == "tuple":                        # Tuple<...> → Tuple<...>: per-position
+            vt = V.ValueTuple.cast(sv)                             # element retype at fixed arity (each
+            ets = V.TypeTuple.cast(tt).types()                    # position rides _retype_element).
+            if vt.size() != len(ets):
+                raise ValueError(f"[unsupported] tuple arity change {vt.size()}→{len(ets)} — a tuple "
+                                 f"retype must preserve arity (it is a per-position element conversion)")
+            return V.ValueTuple(tt, [self._retype_element(vt.at(i, encoded=False), ets[i], policy,
+                                                          self._sub(site, f".{i}")) for i in range(len(ets))])
         if sc == "vector" and tc == "set":                         # Vector → Set (collapse)
             et = V.TypeSet.cast(tt).element_type()
             out = V.ValueSet(tt)
@@ -624,7 +648,14 @@ class DefinitionsRewriter:
                               self._retype_element(val, te, policy, vsite), site)
             return out
 
-        # -- leaf
+        # -- leaf: a scalar↔scalar conversion from here on. Any COMPOSITE reaching this point has
+        #    no conversion branch above — fail CLOSED (invariant #1), never the numeric tail's crash
+        #    on a composite operand. A composite retype the engine does not express automatically
+        #    (struct↔struct, enum↔enum, key↔key, any, …) belongs to a Class-C hook.
+        if sc in COMPOSITES or tc in COMPOSITES:
+            raise ValueError(f"[unsupported] retype {sc}→{tc}: no conversion branch for this "
+                             f"composite retype — use a transform_field / transform_type hook, or "
+                             f"an explicit directive; the engine will not guess a composite mapping")
         if (sc, tc) in WIDENING:
             return V.Value.create(tt, V.Value.dumps(sv))           # A: widen (lossless)
         if tc == "string":

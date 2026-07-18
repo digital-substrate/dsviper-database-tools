@@ -1666,5 +1666,101 @@ class TestContainerElementRetype(unittest.TestCase):
         self.assertIn("element narrowing", str(cm.exception))
 
 
+class TestHolderElementRetype(unittest.TestCase):
+    """`Optional<A>→Optional<B>` and `Tuple<...>→Tuple<...>`: the multiplicity-1 holders join the
+    element-retype family — widen (Class A, automatic) / narrow (Class B, policied) per inner value,
+    nil- and position-preserving. Previously these crashed in the scalar narrowing tail."""
+
+    def _mk(self, src_t, tgt_t, policy=None):
+        src = V.Definitions()
+        s = struct(src, "S", [("f", src_t)])
+        d = TransformationDirectives()
+        d.retype_field(s.representation(), "f", tgt_t, policy=policy)
+        rewriter, target = DefinitionsRewriter.from_directives(src, d)
+        return rewriter, target, s
+
+    def test_optional_widen_is_class_a_no_policy(self):
+        rw, tgt, s = self._mk(V.TypeOptional(T.INT32), V.TypeOptional(T.INT64))    # no policy — lossless
+        out = rw.value(V.ValueStructure(
+            s, {"f": V.ValueOptional(V.TypeOptional(T.INT32), V.Value.create(T.INT32, 7))}))
+        back = V.ValueStructure.cast(rt(rw, tgt, out, s))                          # well-formed in target
+        self.assertEqual(7, back.at("f", encoded=False).unwrap(encoded=True))
+
+    def test_optional_narrow_saturate_and_nil_preserved(self):
+        rw, _tgt, s = self._mk(V.TypeOptional(T.INT64), V.TypeOptional(T.INT32), policy="saturate")
+        O64 = V.TypeOptional(T.INT64)
+        out = rw.value(V.ValueStructure(s, {"f": V.ValueOptional(O64, V.Value.create(T.INT64, 2 ** 40))}))
+        self.assertEqual(2 ** 31 - 1, out.at("f", encoded=False).unwrap(encoded=True))    # saturated
+        nout = rw.value(V.ValueStructure(s, {"f": V.ValueOptional(O64)}))          # nil stays nil
+        self.assertTrue(nout.at("f", encoded=False).is_nil())
+
+    def test_optional_narrow_without_policy_refused(self):
+        with self.assertRaises(ValueError) as cm:
+            self._mk(V.TypeOptional(T.INT64), V.TypeOptional(T.INT32))             # narrow, no policy
+        self.assertIn("narrowing", str(cm.exception))
+
+    def test_tuple_per_position_widen_and_narrow(self):
+        rw, _t, s = self._mk(V.TypeTuple([T.INT32, T.STRING]), V.TypeTuple([T.INT64, T.STRING]))  # widen, A
+        out = rw.value(V.ValueStructure(
+            s, {"f": V.ValueTuple(V.TypeTuple([T.INT32, T.STRING]), [V.Value.create(T.INT32, 5), V.ValueString("a")])}))
+        t = out.at("f", encoded=False)
+        self.assertEqual((5, "a"), (t.at(0, encoded=True), t.at(1, encoded=True)))
+        rw2, _t2, s2 = self._mk(V.TypeTuple([T.INT64, T.STRING]), V.TypeTuple([T.INT32, T.STRING]), policy="saturate")
+        out2 = rw2.value(V.ValueStructure(
+            s2, {"f": V.ValueTuple(V.TypeTuple([T.INT64, T.STRING]), [V.Value.create(T.INT64, 2 ** 40), V.ValueString("b")])}))
+        t2 = out2.at("f", encoded=False)
+        self.assertEqual((2 ** 31 - 1, "b"), (t2.at(0, encoded=True), t2.at(1, encoded=True)))
+
+    def test_nested_vector_of_optional_narrow_policied(self):
+        O64, O32 = V.TypeOptional(T.INT64), V.TypeOptional(T.INT32)
+        rw, _t, s = self._mk(V.TypeVector(O64), V.TypeVector(O32), policy="saturate")
+        vv = V.ValueVector(V.TypeVector(O64))
+        vv.append(V.ValueOptional(O64, V.Value.create(T.INT64, 2 ** 40)))
+        vv.append(V.ValueOptional(O64))                                            # a nil element
+        out = rw.value(V.ValueStructure(s, {"f": vv}))
+        r = V.ValueVector.cast(out.at("f", encoded=False))
+        self.assertEqual(2 ** 31 - 1, V.ValueOptional.cast(r.at(0, encoded=False)).unwrap(encoded=True))
+        self.assertTrue(V.ValueOptional.cast(r.at(1, encoded=False)).is_nil())
+
+
+class TestCompositeRetypeGuard(unittest.TestCase):
+    """A retype between COMPOSITES with no conversion branch (struct↔struct, enum↔enum, key↔key, …)
+    fails CLOSED — a clean `[unsupported]` refusal, never the scalar tail's crash (invariant #1:
+    total, or an explicit refusal)."""
+
+    def _apply(self, mk):
+        src = V.Definitions()
+        holder, tgt_type, make_val = mk(src)
+        d = TransformationDirectives()
+        d.retype_field(holder.representation(), "f", tgt_type, policy="saturate")
+        rewriter, _ = DefinitionsRewriter.from_directives(src, d)
+        rewriter.value(V.ValueStructure(holder, {"f": make_val()}))
+
+    def test_struct_to_struct_refused(self):
+        def mk(src):
+            s1 = struct(src, "S1", [("a", T.INT32)]); s2 = struct(src, "S2", [("b", T.INT32)])
+            return struct(src, "H", [("f", s1)]), s2, lambda: V.ValueStructure(s1, {"a": 5})
+        with self.assertRaises(ValueError) as cm:
+            self._apply(mk)
+        self.assertIn("no conversion branch", str(cm.exception))
+
+    def test_enum_to_enum_refused(self):
+        def mk(src):
+            e1 = enum(src, "E1", ["a"]); e2 = enum(src, "E2", ["b"])
+            return struct(src, "HE", [("f", e1)]), e2, lambda: V.ValueEnumeration(e1, "a")
+        with self.assertRaises(ValueError) as cm:
+            self._apply(mk)
+        self.assertIn("no conversion branch", str(cm.exception))
+
+    def test_key_to_key_refused(self):
+        def mk(src):
+            ca = src.create_concept(NS, "CA"); cb = src.create_concept(NS, "CB")
+            return (struct(src, "HK", [("f", V.TypeKey(ca))]), V.TypeKey(cb),
+                    lambda: V.ValueKey.create(ca, V.ValueUUId("11111111-1111-1111-1111-111111111111")))
+        with self.assertRaises(ValueError) as cm:
+            self._apply(mk)
+        self.assertIn("no conversion branch", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
