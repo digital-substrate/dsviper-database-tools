@@ -1346,8 +1346,12 @@ def build_target_definitions(source_defs, directives):
                         ftype = _transposed_type(s.representation(), f)
                     elif f.name() in retypes:                       # family 2: retype
                         ftype = retypes[f.name()][0]
-                    else:
-                        ftype = map_t(f.type())
+                    else:                                           # carried (kept or renamed): same type
+                        default = f.default_value()                 # carry a domain-free source default: a
+                        if default is not None and _default_domain_free(f.type()):  # non-zero default is part
+                            ftype = V.Value.create(f.type(), default)  # of the runtimeId (like documentation),
+                        else:                                       # so a plain carry must keep it; a named-type
+                            ftype = map_t(f.type())                 # default would carry stale ids — type alone
                     fields.append((fren.get(f.name(), f.name()), ftype,
                                    fdocs.get(f.name(), f.documentation())))
                 for name, payload, derive in adds:                  # family 2: add (static or derived)
