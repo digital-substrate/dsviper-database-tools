@@ -14,6 +14,12 @@ case, namespace and *resolved* type-reference. Each directive maps to edits at t
 spans. The shipped ``rewrite/`` engine is reused only as the verification oracle:
 re-parse the patched tree and compare its ``Definitions`` digest to the engine's target
 (``runtimeId`` is a structure fingerprint, so equal digests prove the patch faithful).
+
+Function pools live *outside* the persistence ``Definitions`` (they are binding/service,
+not stored data), so the engine's digest ignores them and carries no pool directive. But
+their signatures reference named types, and the source-map captures those references like
+any other — so a type rename or a namespace rename flows into pool signatures through the
+same reference pass, keeping the patched tree resolvable (which the verify re-parse checks).
 """
 
 from __future__ import annotations
@@ -138,7 +144,8 @@ def _resolve_overlaps(edits: list[_Edit]) -> list[_Edit]:
     replacements = [e for e in edits if e.stop > e.start]
     kept = []
     for e in replacements:
-        if any(o is not e and o.start <= e.start and e.stop <= o.stop
+        if any(o is not e and o.source == e.source          # offsets are per-file — compare within one
+               and o.start <= e.start and e.stop <= o.stop
                and (o.stop - o.start) > (e.stop - e.start) for o in replacements):
             continue
         kept.append(e)
@@ -184,12 +191,7 @@ def _index(source_map):
     decl = {_repr(d.type_name()): d for d in source_map.declarations()}
     field = {(_repr(f.structure()), f.name()): f for f in source_map.fields()}
     case = {(_repr(c.enumeration()), c.name()): c for c in source_map.cases()}
-    refs_to: dict[str, list] = {}
-    for r in source_map.references():
-        referent = r.referent()
-        if referent is not None:
-            refs_to.setdefault(_repr(referent), []).append(r)
-    return decl, field, case, refs_to
+    return decl, field, case
 
 
 def _insert_before_close(decl_span, member: str, resolve, files, member_span=None,
@@ -218,7 +220,7 @@ def _insert_before_close(decl_span, member: str, resolve, files, member_span=Non
 
 
 def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> list[_Edit]:
-    decl, field, case, refs_to = _index(source_map)
+    decl, field, case = _index(source_map)
     src_struct = {s.representation(): s for s in source_defs.structures()}
     edits: list[_Edit] = []
 
@@ -228,13 +230,36 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
         source, start, stop = resolve(span)
         edits.append(_Edit(source, start, stop, replacement, tidy))
 
-    # type rename: the declaration name + every resolved reference to it
+    # type rename: patch the declaration name (its references are handled below)
     for src_repr, dst_repr in directives.type_renames.items():
-        name = _simple(dst_repr)
         if src_repr in decl:
-            edit(decl[src_repr].name_span(), name)
-        for ref in refs_to.get(src_repr, ()):
-            edit(ref.span(), name)
+            edit(decl[src_repr].name_span(), _simple(dst_repr))
+
+    # unified reference pass: every resolved type-reference — in a struct field AND in a
+    # function-pool signature (pools sit outside the persistence Definitions, so the engine
+    # digest ignores them, but the parser resolves them and the source-map captures them) —
+    # rewritten to its target name, MIRRORING the source's qualification. A bare reference
+    # (`Customer`) stays bare; a qualified one (`N::SI`, as pool signatures write) keeps its
+    # `NS::` prefix. Both a type rename (simple name) and a namespace rename (the prefix) are
+    # applied here, so a signature that outlives its type's renaming stays valid.
+    for r in source_map.references():
+        referent = r.referent()
+        if referent is None:
+            continue
+        rns = referent.name_space()
+        src_repr = f"{rns.name()}::{referent.name()}"
+        ns_uuid = rns.uuid().representation()
+        renamed_type = src_repr in directives.type_renames
+        renamed_ns = ns_uuid in directives.namespace_names
+        if not (renamed_type or renamed_ns):                  # untouched (incl. every primitive)
+            continue
+        src_file, start, stop = resolve(r.span())
+        original = files[src_file][start:stop]
+        tgt_simple = _simple(directives.type_renames[src_repr]) if renamed_type else referent.name()
+        tgt_ns = directives.namespace_names.get(ns_uuid, rns.name())
+        replacement = (tgt_ns + "::" + tgt_simple) if "::" in original else tgt_simple
+        if replacement != original:
+            edits.append(_Edit(src_file, start, stop, replacement))
 
     # field rename
     for struct_repr, renames in directives.field_renames.items():

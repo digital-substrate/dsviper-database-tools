@@ -67,6 +67,18 @@ enum Status {
 };
 '''
 
+# a function pool declares no persistence — it sits *outside* the namespace, at top level,
+# and its signatures reference named types (qualified, `Shop::Order`). The engine's digest
+# ignores it, but its type references must still follow a rename / namespace-rename so the
+# patched tree keeps resolving.
+TOOLS = '''"""Order tools."""
+function_pool Tools {8d5b40a5-f9a3-4d0e-83dd-90dd282d3cbe} {
+  """summarise an order"""
+  Shop::Order summarise(Shop::Order o);
+  float total(Shop::Order o, float rate);
+};
+'''
+
 
 def _namespace(source_defs, name):
     for c in source_defs.concepts():
@@ -214,6 +226,29 @@ class DefinitionsMigrateTest(unittest.TestCase):
         for text in out.values():                              # every occurrence, both files
             self.assertIn("namespace Store {99999999-9999-9999-9999-999999999999}", text)
             self.assertNotIn("Shop {11111111", text)
+
+    # -- function pools: type references in signatures follow the type edits ------------
+
+    def test_type_rename_propagates_into_pool_signature(self):
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.rename_type("Shop::Order", "Shop::PurchaseOrder")
+            return d
+        out = self._run({"shop.dsm": SHOP, "catalog.dsm": CATALOG, "tools.dsm": TOOLS}, fn)
+        # qualification preserved: Shop::Order -> Shop::PurchaseOrder inside the pool
+        self.assertIn("Shop::PurchaseOrder summarise(Shop::PurchaseOrder o);", out["tools.dsm"])
+        self.assertNotIn("Shop::Order", out["tools.dsm"])
+
+    def test_namespace_rename_propagates_into_qualified_pool_references(self):
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.rename_namespace(_namespace(defs, "Shop"), "Store")
+            return d
+        out = self._run({"shop.dsm": SHOP, "catalog.dsm": CATALOG, "tools.dsm": TOOLS}, fn)
+        self.assertIn("Store::Order summarise(Store::Order o);", out["tools.dsm"])
+        self.assertNotIn("Shop::Order", out["tools.dsm"])
 
     # -- fail closed on a directive the codemod does not yet patch -----------------------
 
