@@ -71,6 +71,7 @@ The entry points around them:
 | `definitions_migrate(dsm_dir, transformation_module, out_dir, *, verify=True)` | the whole chain (§3): read → parse → directives → engine → derive → apply → verify → write |
 | `_read_tree` / `_parse` | I/O and the `DSMBuilder` assembly — the only places that touch a file or the parser |
 | `_refuse_unsupported` / `_UNSUPPORTED` | the fail-closed seam (§7): a directive with no source-patch is refused up front |
+| `_refuse_dangling_pools` / `_pool_findings` / `_signature_type_names` | the pools, which the engine cannot see: refuse a dropped type still named by a signature, notify a rewritten one |
 | `main` / `_load_transformation` | the CLI (`--no-verify`, `--force`) |
 
 > **Read order for a newcomer:** `definitions_migrate()` (the six numbered steps — the whole story
@@ -116,7 +117,7 @@ patched text itself**; `verify=True` will happily pass a wrong patch.
 |---|---|---|
 | documentation (`document_type` / `_field` / `_case` / `_attachment`) | **no** — a doc is outside the `runtimeId` by design (a doc change must never re-id or re-key data) | the re-parse (it is syntactically valid) + a text assertion |
 | a namespace's **display name** (`rename_namespace`) | **no** — the `runtimeId` binds the namespace *uuid*, not its name | the re-parse (references must still resolve) + a text assertion |
-| function-pool signatures | **no** — pools are binding/service, outside persistence | the re-parse: a signature naming a renamed or moved type must still **resolve** |
+| function-pool signatures (both kinds — see below) | **no** — pools are binding/service, outside persistence | the re-parse: a signature naming a renamed or moved type must still **resolve**, and unambiguously |
 | the file split, comments, formatting, blank lines | **no** | nothing — they are preserved *by construction* (§1), which is why no code may rewrite a region it was not asked to |
 
 So there are really **two** oracles, and they are complementary: the **re-parse** proves the patch
@@ -158,8 +159,9 @@ span, and make one subsume the other.
 
 **4 · A reference mirrors the source's qualification — except a move, which always qualifies.**
 The unified reference pass rewrites a resolved reference to its target name while **keeping the
-form the author chose**: a bare `Customer` stays bare, a qualified `Shop::Order` (as pool
-signatures write) keeps its prefix. The one exception is `move_type`: a bare `T` left behind in the
+form the author chose**: a bare `Customer` stays bare, a qualified `Shop::Order` keeps its prefix.
+A pool signature may write either — outside a namespace a bare name still resolves, provided the
+parser finds exactly one candidate. The one exception is `move_type`: a bare `T` left behind in the
 old namespace would dangle, so a moved referent is always rewritten fully qualified. This is also
 the pass that makes pool signatures survive a rename (§3) — the parser resolves them, so the
 source-map holds their references like any other.
@@ -254,7 +256,25 @@ at once: a type rename (the simple name), a namespace rename (the prefix), and a
 always qualified). Qualification mirrors the source (invariant #4). Untouched referents — including
 every primitive — are skipped, so the pass costs nothing on a small edit. This single loop is what
 carries a rename into a **function-pool signature**, which the digest cannot check but the re-parse
-can (§3).
+can (§3). DSM declares two kinds of pool and this pass covers both: `function_pool` (stateless) and
+`attachment_function_pool` (stateful — the name is a code-generation contract, meaning the generated
+function takes `AttachmentGetting`, or `AttachmentMutating` under `mutable`, as an implicit first
+parameter; it binds no persistence attachment, so no attachment directive reaches a pool). Neither
+the pool header nor `mutable` is ever edited, so a migration cannot alter that contract.
+
+Two pool failure modes exist, and they are different in kind — which decides *where* each is
+caught. A **dropped** type leaves a signature naming nothing: that is membership of a name in a
+set, so `_refuse_dangling_pools` answers it **up front**, before any edit, walking the parsed DSM
+model (`_pool_findings` over both pool kinds, `_signature_type_names` down through containers), and
+refuses with every site accumulated. A **renamed** type can instead make a bare signature reference
+*ambiguous* (two namespaces now offer the same simple name): that is a property of the whole
+patched tree, answerable only by resolving it — the parser's job at the verify re-parse, which
+reports it sited and with its candidates. Do not try to pre-compute the second; it would mean
+re-implementing the inspector.
+
+A `transform_type` is the third case and is neither: the signature is rewritten to the new type,
+which is what was asked, so it is **notified** (`on_notice`, printed by the CLI) rather than
+refused — a pool's API changed silently, and the author should know.
 
 **`transform_type`** — a *global* type substitution. The directive keys its source by `runtimeId`
 (the engine's storage key) and records the source type's `representation()` beside it

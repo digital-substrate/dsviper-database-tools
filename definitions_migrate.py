@@ -44,6 +44,87 @@ def _simple(qualified: str) -> str:
     return qualified.rsplit("::", 1)[-1]
 
 
+# -- function pools: outside the persistence Definitions, so outside the engine's view -----
+#
+# A pool declares no storage, so the engine never sees one — but its signatures NAME types, and
+# a migration can leave one naming nothing. Two failure modes, and they differ in kind:
+#
+#   * a DROPPED type leaves a signature naming a type that no longer exists. That is membership
+#     of a name in a set, answerable HERE, before any edit, on the parsed DSM model (where a
+#     reference is a `TypeName` — an FQN — whatever the source text writes);
+#   * a RENAMED type can instead make a bare signature reference AMBIGUOUS (two namespaces now
+#     offering one simple name). That is a property of the whole patched tree, answerable only
+#     by resolving it — the parser's job at the verify re-parse, which reports it sited and with
+#     its candidates. Pre-computing it would mean re-implementing the inspector; do not.
+
+def _signature_type_names(node, out: list) -> None:
+    """Every named type a signature's return/parameter type references, by FQN. The DSM model
+    nests typed nodes (`element_type` / `key_type` / `types`) down to a leaf reference, so the
+    walk is by shape, not by class — a composite added later is followed, not missed."""
+    if hasattr(node, "type_name"):                      # a leaf reference
+        out.append(str(node.type_name()))
+        return
+    if hasattr(node, "types"):                          # tuple / variant
+        for t in node.types():
+            _signature_type_names(t, out)
+        return
+    if hasattr(node, "key_type"):                       # map
+        _signature_type_names(node.key_type(), out)
+    if hasattr(node, "element_type"):                   # vector / set / optional / key / map
+        _signature_type_names(node.element_type(), out)
+
+
+def _pool_findings(dsm_defs, directives):
+    """Walk every signature of both pool kinds — `function_pool` (stateless) and
+    `attachment_function_pool` (stateful; the name is a codegen contract about an implicit first
+    parameter, it binds no persistence attachment) — and classify each named type it references:
+    dropped (dangling, refused) or transform_type'd (rewritten, worth telling the author)."""
+    transformed = {}
+    for rid, (new_type, _fn) in directives.transformed_types.items():
+        name = directives.transformed_type_names.get(rid)
+        if name is not None:
+            transformed[name] = new_type.representation()
+
+    dangling, rewritten = [], []
+    pools = [p for p in dsm_defs.function_pools()]
+    pools += [p for p in dsm_defs.attachment_function_pools()]
+    for pool in pools:
+        for function in pool.functions():
+            prototype = function.prototype()
+            sites = [("return type", prototype.return_type())]
+            sites += [(f"parameter '{name}'", node) for name, node in prototype.parameters()]
+            for label, node in sites:
+                names: list = []
+                _signature_type_names(node, names)
+                for fqn in names:
+                    site = (f"{pool.name()}::{prototype.name()}", label, fqn)
+                    if fqn in directives.dropped_types:
+                        dangling.append(site)
+                    elif fqn in transformed:
+                        rewritten.append(site + (transformed[fqn],))
+    return dangling, rewritten
+
+
+def _refuse_dangling_pools(dsm_defs, directives, on_notice=None) -> None:
+    """Refuse a migration that would leave a pool signature naming a dropped type, with every
+    site accumulated into one report. A transform_type'd type is NOT refused — the signature is
+    rewritten to the new type, which is what was asked — but it silently changes a pool's API,
+    so it is notified instead."""
+    dangling, rewritten = _pool_findings(dsm_defs, directives)
+    if on_notice is not None:
+        for signature, label, fqn, new in sorted(rewritten):
+            on_notice(f"[pool-signature-rewritten] {signature} — {label} : {fqn} -> {new}")
+    if not dangling:
+        return
+    lines = "\n".join(f"  {signature} — {label} : {fqn}"
+                      for signature, label, fqn in sorted(dangling))
+    raise ValueError("[dropped-type-in-pool] drop_type would leave "
+                     f"{len(dangling)} function-pool signature(s) naming a type that no longer "
+                     "exists:\n" + lines +
+                     "\nA pool is an API, not a document — no policy converts a live call. Edit the "
+                     "signature by hand, drop the function, or keep the dropped type.")
+
+
 # -- span resolution: a global (content) offset -> (file, local offset) ----------------
 
 def _line_starts(text: str) -> list[int]:
@@ -710,7 +791,7 @@ def _parse(files: dict[str, str], source_map=None):
     for name, text in files.items():
         builder.append(name, text)
     report, dsm_defs, definitions = builder.parse(source_map=source_map)
-    return builder, report, definitions
+    return builder, report, dsm_defs, definitions   # dsm_defs holds the pools (outside Definitions)
 
 
 # Every TransformationDirectives edit now has a source-patch; the whole surface is covered.
@@ -728,16 +809,17 @@ def _refuse_unsupported(directives):
             + " — migrate the data with database_migrate.py and edit the .dsm by hand.")
 
 
-def definitions_migrate(dsm_dir, transformation_module, out_dir, *, verify=True):
+def definitions_migrate(dsm_dir, transformation_module, out_dir, *, verify=True, on_notice=None):
     """Patch the ``.dsm`` tree under ``transformation_module.build_directives`` and
-    write the result to ``out_dir``. Returns the parse report."""
+    write the result to ``out_dir``. Returns the parse report. ``on_notice`` (a callable taking
+    one line) receives the findings that inform rather than refuse."""
     files = _read_tree(dsm_dir)
     if not files:
         raise ValueError(f"no .dsm files under {dsm_dir!r}")
 
     # 1. parse the source, collecting the source-map
     source_map = V.DSMSourceMap()
-    builder, report, source_defs = _parse(files, source_map)
+    builder, report, dsm_defs, source_defs = _parse(files, source_map)
     if report.has_error():
         raise ValueError("source .dsm does not parse:\n"
                          + "\n".join(f"  {e.source()}:{e.line()}:{e.pos()} {e.message()}"
@@ -747,8 +829,10 @@ def definitions_migrate(dsm_dir, transformation_module, out_dir, *, verify=True)
     directives = transformation_module.build_directives(source_defs)
     _refuse_unsupported(directives)
 
-    # 3. engine oracle: the target definitions (+ the source->target type map)
+    # 3. engine oracle: the target definitions (+ the source->target type map). The engine sees
+    #    the persistence schema only, so the pools are checked here, on the same up-front footing.
     rewriter, target_defs = DefinitionsRewriter.from_directives(source_defs, directives)
+    _refuse_dangling_pools(dsm_defs, directives, on_notice)
 
     # 4. derive span-precise edits and apply them per file
     resolver = _Resolver(builder)
@@ -762,7 +846,7 @@ def definitions_migrate(dsm_dir, transformation_module, out_dir, *, verify=True)
     #    Before the write, not after: a failed verify must leave no target tree behind (the
     #    codemod's twin of the data migration discarding a partial target).
     if verify:
-        _vbuilder, vreport, vdefs = _parse(patched)
+        _vbuilder, vreport, _vdsm, vdefs = _parse(patched)
         if vreport.has_error():
             raise AssertionError("patched .dsm does not parse:\n"
                                  + "\n".join(f"  {e.source()}:{e.line()}:{e.pos()} {e.message()}"
@@ -834,7 +918,8 @@ def main():
 
     module = _load_transformation(os.path.expanduser(args.transformation))
     try:
-        definitions_migrate(source_dir, module, out_dir, verify=not args.no_verify)
+        definitions_migrate(source_dir, module, out_dir, verify=not args.no_verify,
+                            on_notice=lambda line: print(line, file=sys.stderr))
     except (ValueError, AssertionError, NotImplementedError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)

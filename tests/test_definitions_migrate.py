@@ -523,6 +523,60 @@ class DefinitionsMigrateTest(unittest.TestCase):
         self.assertIn("vector<N::B> many;", body)
         self.assertNotIn("struct A {", body)                     # the engine drops the transformed decl
 
+    def test_dropped_type_still_named_by_a_pool_is_refused_up_front(self):
+        # A pool declares no storage, so the engine never sees one — but a signature names types,
+        # and a `drop_type` can leave it naming nothing. Refused before any edit, every site
+        # accumulated: both pool kinds, nested inside a container, return type and parameters.
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 'struct Money { uint32 cents; };\n\nstruct Order { uint32 id; };\n\n};\n')
+        pools = ('function_pool Tools {8d5b40a5-f9a3-4d0e-83dd-90dd282d3cbe} {\n'
+                 '  N::Money total(vector<N::Money> xs);\n'
+                 '  uint32 count(N::Order o);\n};\n'
+                 'attachment_function_pool Ops {9d5b40a5-f9a3-4d0e-83dd-90dd282d3cbe} {\n'
+                 '  mutable uint32 bump(map<uint32, N::Money> m);\n};\n')
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.drop_type("N::Money")
+            return d
+        with self.assertRaises(ValueError) as caught:
+            self._run({"model.dsm": model, "pools.dsm": pools}, fn)
+        message = str(caught.exception)
+        self.assertIn("[dropped-type-in-pool]", message)
+        self.assertIn("Tools::total — return type", message)
+        self.assertIn("Tools::total — parameter 'xs'", message)      # nested in a vector
+        self.assertIn("Ops::bump — parameter 'm'", message)          # nested in a map, other kind
+        self.assertNotIn("count", message)                           # names no dropped type
+
+    def test_transform_type_rewriting_a_pool_signature_is_notified(self):
+        # Not dangling — the signature is rewritten to the new type, which is what was asked —
+        # but it silently changes a pool's API, so the author is told rather than refused.
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 'struct Money { uint32 cents; };\n\n};\n')
+        pools = ('function_pool Tools {8d5b40a5-f9a3-4d0e-83dd-90dd282d3cbe} {\n'
+                 '  N::Money total(uint32 n);\n};\n')
+
+        notices = []
+        src = tempfile.mkdtemp()
+        out = tempfile.mkdtemp()
+        for name, text in (("model.dsm", model), ("pools.dsm", pools)):
+            with open(os.path.join(src, name), "w", encoding="utf-8") as handle:
+                handle.write(text)
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            money = next(s for s in defs.structures() if s.representation() == "N::Money")
+            d.transform_type(money, V.Type.UINT64, lambda v, t: V.ValueUInt64(0))
+            return d
+        dm.definitions_migrate(src, _Transformation(fn), out, verify=True,
+                               on_notice=notices.append)
+        self.assertEqual(["[pool-signature-rewritten] Tools::total — return type : "
+                          "N::Money -> uint64"], notices)
+        with open(os.path.join(out, "pools.dsm"), encoding="utf-8") as handle:
+            self.assertIn("uint64 total(uint32 n);", handle.read())
+
     def test_transform_type_reaches_a_type_the_schema_does_not_hold(self):
         # A composite used ONLY in a function-pool signature is in no `Definitions` (pools sit
         # outside persistence) — so it cannot be found by walking the schema. The directive keeps
