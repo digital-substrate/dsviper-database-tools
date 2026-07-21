@@ -35,4 +35,6 @@ Issues = "https://github.com/digital-substrate/dsviper-database-tools/issues"
 packages = ["dsviper_database_tools"]
 
 [tool.hatch.build.targets.sdist]
-include = ["dsviper_database_tools", "database_migrate.py", "tests", "examples", "REWRITE.md", "MIGRATION_GUIDE.md", "README.md", "CHANGELOG.md", "LICENSE"]
+include = ["dsviper_database_tools", "database_migrate.py", "definitions_migrate.py",
+           "tests", "examples", "REWRITE.md", "DEFINITIONS_MIGRATE.md", "MIGRATION_GUIDE.md",
+           "SUPPORT.md", "README.md", "CHANGELOG.md", "LICENSE"]
