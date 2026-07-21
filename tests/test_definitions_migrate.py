@@ -492,6 +492,25 @@ class DefinitionsMigrateTest(unittest.TestCase):
         self.assertIn("attachment<Vendor, uint32> supplierOrders;", out["model.dsm"])
         self.assertIn('"""placed by a customer"""', out["model.dsm"])
 
+    def test_a_local_name_addresses_every_homonym_like_the_engine(self):
+        # The bare local name is the legacy key and it is NOT an identity: the engine's lookup
+        # hits every attachment carrying that name, so this layer must patch every matching
+        # declaration — mirroring the engine, which is what the digest then agrees with.
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 'concept Customer;\nconcept Vendor;\n\n'
+                 'attachment<Customer, uint32> orders;\n\n'
+                 'attachment<Vendor, uint32> orders;\n\n'
+                 '};\n')
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.rename_attachment("orders", "placed")        # ambiguous on purpose
+            return d
+        out = self._run({"model.dsm": model}, fn)
+        self.assertIn("attachment<Customer, uint32> placed;", out["model.dsm"])
+        self.assertIn("attachment<Vendor, uint32> placed;", out["model.dsm"])
+
     # -- transform_type: a global type substitution at every occurrence, nested included -------
 
     def test_transform_type_primitive_named_and_composite(self):

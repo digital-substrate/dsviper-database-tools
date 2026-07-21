@@ -368,16 +368,11 @@ The engine work comes first (see REWRITE.md §7); then, here:
 Scope limits, each one verified by running the tool, recorded so they are not rediscovered as
 bugs. They sort by kind, and the kind is what tells you how much to worry.
 
-#### Silently incomplete
+> The one edge that used to sit here — a legacy local name addressing two homonymous attachments —
+> is gone: once the source map began reporting a declaration's `identifier()`, a directive key could
+> address the **list** of declarations it names, so a local name patches every homonym exactly as the
+> engine's own lookup does. Nothing is silently incomplete today.
 
-- **A legacy local-name directive on an ambiguous attachment reaches nothing here.** An
-  attachment's name is qualified by its **key concept**, not just its namespace: its identity is
-  `identifier()`, `NS::KeyConcept.name`, so one namespace may legitimately hold
-  `attachment<Customer, …> orders` *and* `attachment<Vendor, …> orders`. Addressed by identifier,
-  both are patched exactly — `_index` keys declarations on the source map's own `identifier()`.
-  Addressed by the bare local name (the legacy key the engine still accepts), the directive is
-  ambiguous: the engine renames **every** homonym while this layer cannot choose one, so
-  `att_repr` drops the ambiguous key and the digest refuses. Name the identifier.
 #### Cosmetic — deliberate
 
 - **Two moves into the same absent namespace produce two adjacent blocks** (in reverse derivation

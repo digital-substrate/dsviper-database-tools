@@ -317,19 +317,15 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
     src_struct = {s.representation(): s for s in source_defs.structures()}
     # an attachment directive addresses its target by `identifier()` (`NS::KeyConcept.name`) —
     # the attachment's identity, and the declaration's key — or, legacy, by the bare local name.
-    # A local name is NOT an identity (one namespace may hold `A.orders` and `B.orders`), so a
-    # legacy key that hits several attachments resolves to none of them here: the engine renames
-    # every homonym, this layer would patch one, and the digest refuses. Map the unambiguous ones.
-    att_repr = {}
-    ambiguous = set()
+    # A local name is NOT an identity: one namespace may hold `Customer.orders` and
+    # `Vendor.orders`, and the engine's own lookup then hits BOTH. So a key maps to the LIST of
+    # declarations it addresses, and every directive applies to all of them — mirroring the
+    # engine exactly (invariant #1), rather than picking one or refusing.
+    att_repr: dict[str, list[str]] = {}
     for a in source_defs.attachments():
-        att_repr[a.identifier()] = a.identifier()
-        local = a.identifier().rsplit(".", 1)[-1]
-        if local in att_repr:
-            ambiguous.add(local)
-        att_repr[local] = a.identifier()
-    for local in ambiguous:
-        del att_repr[local]
+        identifier = a.identifier()
+        att_repr.setdefault(identifier, []).append(identifier)
+        att_repr.setdefault(identifier.rsplit(".", 1)[-1], []).append(identifier)
     edits: list[_Edit] = []
 
     def edit(span, replacement, tidy=False):
@@ -413,9 +409,10 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
     # and NOTHING references an attachment (a key is a concept-instance identity, not a foreign
     # key), so only its declaration name needs patching — no reference sweep. Keyed by local name.
     for old_id, new_id in directives.attachment_renames.items():
-        d = decl.get(att_repr.get(old_id, ""))
-        if d is not None:
-            edit(d.name_span(), new_id.rsplit(".", 1)[-1])   # a new id may be written qualified
+        for identifier in att_repr.get(old_id, ()):
+            d = decl.get(identifier)
+            if d is not None:
+                edit(d.name_span(), new_id.rsplit(".", 1)[-1])   # a new id may be written qualified
 
     # field type change (retype / transform / resize / transpose): replace the type
     # expression with the engine-computed target type — the single oracle for the shape.
@@ -489,10 +486,11 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
             c = case.get((enum_repr, cname))
             if c is not None:
                 doc_edit(c.documentation_span(), c.name_span(), text)
-    for local, text in directives.attachment_docs.items():
-        d = decl.get(att_repr.get(local, ""))
-        if d is not None:
-            doc_edit(d.documentation_span(), d.block_span(), text)
+    for key, text in directives.attachment_docs.items():
+        for identifier in att_repr.get(key, ()):
+            d = decl.get(identifier)
+            if d is not None:
+                doc_edit(d.documentation_span(), d.block_span(), text)
 
     # add a field: render it and splice before the struct's closing brace
     for struct_repr, adds in directives.added_fields.items():
@@ -535,10 +533,11 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
     for type_repr in directives.dropped_types:
         if type_repr in decl:
             edit(decl[type_repr].block_span(), "", tidy=True)
-    for local in directives.dropped_attachments:
-        d = decl.get(att_repr.get(local, ""))
-        if d is not None:
-            edit(d.block_span(), "", tidy=True)
+    for key in directives.dropped_attachments:
+        for identifier in att_repr.get(key, ()):
+            d = decl.get(identifier)
+            if d is not None:
+                edit(d.block_span(), "", tidy=True)
 
     # drop field: cut the whole field declaration
     for struct_repr, dropped in directives.dropped_fields.items():
@@ -699,8 +698,8 @@ def _relocate_moved_types(edits, directives, decl, source_map, resolve, files, a
     # types AND attachments move the same way (both are declarations); an attachment names its
     # target by identifier (or a legacy local name), resolved to the declaration key via att_repr.
     moves = [(t, ns) for t, ns in directives.type_namespaces.items()]
-    moves += [(att_repr[i], ns) for i, ns in directives.attachment_namespaces.items()
-              if i in att_repr]
+    moves += [(identifier, ns) for key, ns in directives.attachment_namespaces.items()
+              for identifier in att_repr.get(key, ())]
     if not moves:
         return edits
     blocks = {}                                               # namespace uuid -> [(file, uuid_stop)]
