@@ -362,14 +362,16 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
                 continue
             edit(f.type_span(), tf.type().representation(namespace=tns) + " ")
             # a default was authored against the OLD type, so the engine does not carry it onto a
-            # type-changed field. Follow the engine (it is the authority on the shape): cut the
-            # `= <literal>` tail — the span from the field name's end to the declaration's end —
-            # or the text would declare a default the target definition does not have.
-            if tf.default_value() is None:
-                src, _nstart, nstop = resolve(f.name_span())
-                _dsrc, _dstart, dstop = resolve(f.declaration_span())
-                if dstop > nstop:
-                    edits.append(_Edit(src, nstop, dstop, ""))
+            # type-changed field. Follow the engine (it is the authority on the shape) and cut the
+            # `= <literal>` clause, or the text would declare a default the target definition does
+            # not have. The clause is a grammar rule of its own, so the parser hands us its span —
+            # nothing to infer from the neighbouring spans.
+            if tf.default_value() is None and f.default_span() is not None:
+                src, dstart, dstop = resolve(f.default_span())
+                text = files[src]
+                while dstart > 0 and text[dstart - 1] in " \t":   # the clause starts at `=`; the
+                    dstart -= 1                                    # space before it is a separator
+                edits.append(_Edit(src, dstart, dstop, ""))
 
     # namespace rename (display name) / remap (uuid): patch every occurrence of the
     # namespace declaration across the file split (a namespace may span several files).
