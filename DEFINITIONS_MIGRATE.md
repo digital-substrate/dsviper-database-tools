@@ -4,7 +4,8 @@ The developer/maintainer companion to `definitions_migrate.py`, the **source twi
 migration. `database_migrate.py` migrates the data in a base; this tool migrates the hand-authored
 `.dsm` files that declare that schema — under the *same* `transformation.py`. For the engine that
 both rest on, read [REWRITE.md](REWRITE.md); to *use* the tools, the
-[migration guide](MIGRATION_GUIDE.md).
+[migration guide](MIGRATION_GUIDE.md); for the scope map and the "why not re-render?" answer in
+user terms, [SUPPORT.md](SUPPORT.md).
 
 > 1 · The principle · 2 · Module map · 3 · The chain of proof · 4 · Invariants · 5 · The edit
 > algebra · 6 · The directives, family by family · 7 · Extension points · 8 · The Viper boundary ·

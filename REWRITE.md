@@ -3,7 +3,8 @@
 The developer/maintainer companion to the code. It explains *why* the engine is shaped the way
 it is, names the invariants, and links each idea to where it lives — by **file : symbol** (line
 numbers drift, names don't). To *use* the tool, read the [migration guide](MIGRATION_GUIDE.md);
-for the terse directive reference, the [README](README.md).
+for the terse directive reference, the [README](README.md); for the scope map — what is supported,
+what is refused and which kind of refusal it is — [SUPPORT.md](SUPPORT.md).
 
 > 1 · The principle · 2 · Module map · 3 · The chain of proof · 4 · Invariants · 5 · The engine ·
 > 6 · The store loops · 7 · Extension points · 8 · The Viper boundary · Appendix — a worked trace.

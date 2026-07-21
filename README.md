@@ -15,7 +15,9 @@ indifferent to where the value came from or where it goes. A `Database` / `Commi
 migration is its flagship application (what this tool ships); the same engine could transcode
 — a value decoded from JSON, re-encoded as XML — because the whole transform lives in Viper's
 `Definition` / `Type` / `Value` space. New here? Start with the
-**[migration guide](MIGRATION_GUIDE.md)** — the mental map.
+**[migration guide](MIGRATION_GUIDE.md)** — the mental map — and **[SUPPORT.md](SUPPORT.md)** for
+what a migration can express, what it refuses and why, including why the `.dsm` is patched rather
+than re-rendered.
 
 This package gives you:
 
