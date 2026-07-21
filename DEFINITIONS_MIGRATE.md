@@ -191,6 +191,15 @@ not taught to `_derive` should be refused *up front* with an actionable message,
 digest oracle to reject after the fact with a hex mismatch. Extending the directive vocabulary
 without visiting this file is the failure mode it exists to catch.
 
+**8b · A directive that names nothing is refused, not ignored.** A directive addresses its target
+by its **source** name, so a misspelling matches nothing: the target is built as if it had never
+been written, the digest agrees, and the run reports success having changed not one byte. The
+engine's `_refuse_unknown_targets` (phase 1, before anything is built) turns that silence into one
+accumulated report. Two families are exempt **because their names are not source names**:
+`field_order` / `case_order` list the *target* member set, and `transform_type` keys a `runtimeId`
+that need not occur in the persistence schema at all — a composite used only in a pool signature is
+exactly the case this tool exists to handle. Do not "tighten" either one.
+
 **9 · The source tree is read-only, and the target is written only after verification.** The
 inputs are never mutated (the tool's non-destructiveness is what makes it safe to rerun), and the
 re-parse + digest check runs on the in-memory patched text, so a failure leaves nothing on disk —
@@ -369,11 +378,6 @@ bugs. They sort by kind, and the kind is what tells you how much to worry.
   Addressed by the bare local name (the legacy key the engine still accepts), the directive is
   ambiguous: the engine renames **every** homonym while this layer cannot choose one, so
   `att_repr` drops the ambiguous key and the digest refuses. Name the identifier.
-- **A directive naming a type or member that does not exist** (a typo) is a **silent no-op**: the
-  engine ignores it, so the target digest is unchanged, the codemod patches nothing, and `verify`
-  passes with a success message. Shared with the data migration — the directive language has no
-  "did you mean" — but it bites harder here, where the user's evidence of success is a diff.
-
 #### Cosmetic — deliberate
 
 - **Two moves into the same absent namespace produce two adjacent blocks** (in reverse derivation

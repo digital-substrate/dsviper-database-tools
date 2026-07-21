@@ -1079,6 +1079,115 @@ def _validate_dimension_ops(src, directives):
                 _transposed_type(srep, s.check(fname))
 
 
+def _refuse_unknown_targets(src, directives):
+    """Accumulate EVERY directive that names something the SOURCE schema does not hold, and refuse
+    them together — before any definition is built.
+
+    A directive names its target by its **source** name, so a misspelling matches nothing and the
+    directive simply never fires: the target is built as if it had not been written, the digest
+    agrees with it, and the migration reports success having done nothing. That silence is the
+    failure mode this guard removes; it is worst for a source codemod, where the only evidence of
+    success is a diff.
+
+    Two families are deliberately NOT checked, and for the same reason in both cases — the name is
+    not a source name:
+
+    * `field_order` / `case_order` list the **target** member set (after renames, adds and drops),
+      so their entries cannot be looked up in the source. Their struct/enum key is checked; their
+      contents are validated by the build itself, which refuses a non-permutation.
+    * `transform_type` keys its source by `runtimeId`, and that type need not occur in the
+      persistence schema at all — a composite used only in a function-pool signature is the case
+      this tool exists to handle. Refusing it here would break exactly that.
+    """
+    structures = {s.representation(): s for s in src.structures()}
+    enumerations = {e.representation(): e for e in src.enumerations()}
+    named = set(structures) | set(enumerations)
+    named |= {c.representation() for c in src.concepts()}
+    named |= {c.representation() for c in src.clubs()}
+    namespaces = {d.type_name().name_space().uuid().representation()
+                  for d in (*src.structures(), *src.enumerations(),
+                            *src.concepts(), *src.clubs())}
+    attachments = set()
+    for a in src.attachments():
+        attachments.update(_att_keys(a))
+
+    findings = []
+
+    def known_type(directive, repr_, pool, what):
+        if repr_ in pool:
+            return True
+        findings.append(f"{directive}('{repr_}') — no such {what}")
+        return False
+
+    def known_members(directive, holder_repr, holders, names, what, extra=()):
+        # the holder was already reported when unknown; do not report its members too
+        holder_what = "structure" if what == "fields" else "enumeration"
+        if not known_type(directive, holder_repr, set(holders), holder_what):
+            return
+        held = holders[holder_repr]
+        have = {m.name() for m in (held.fields() if what == "fields" else held.cases())}
+        have.update(extra)
+        for name in names:
+            if name not in have:
+                findings.append(f"{directive}('{holder_repr}', '{name}') — "
+                                f"no such {what[:-1]} in {holder_repr}")
+
+    for repr_ in directives.type_renames:
+        known_type("rename_type", repr_, named, "type")
+    for repr_ in directives.type_docs:
+        known_type("document_type", repr_, named, "type")
+    for repr_ in directives.dropped_types:
+        known_type("drop_type", repr_, named, "type")
+    for repr_ in directives.type_namespaces:
+        known_type("move_type", repr_, named, "type")
+
+    for directive, group, names_of in (
+            ("rename_field", directives.field_renames, dict.keys),
+            ("drop_field", directives.dropped_fields, lambda v: v),
+            ("retype_field", directives.retyped_fields, dict.keys),
+            ("resize_field", directives.resized_fields, dict.keys),
+            ("transpose_mat_field", directives.transposed_fields, lambda v: v),
+            ("transform_field", directives.transformed_fields, dict.keys),
+            ("document_field", directives.field_docs, dict.keys)):
+        for holder, entry in group.items():
+            # an ADDED field takes its doc from document_field, so it is a legal target there —
+            # unlike an added case, whose doc the build does not carry (added cases default to
+            # none), which this guard therefore reports rather than silently ignoring.
+            added = ({name for name, _payload, _derive in directives.added_fields.get(holder, ())}
+                     if directive == "document_field" else ())
+            known_members(directive, holder, structures, names_of(entry), "fields", added)
+    for holder in (*directives.added_fields, *directives.field_order):
+        known_type("add_field / reorder_fields", holder, set(structures), "structure")
+
+    for directive, group in (("rename_case", directives.case_renames),
+                             ("remove_case", directives.removed_cases),
+                             ("document_case", directives.case_docs)):
+        for holder, entry in group.items():
+            known_members(directive, holder, enumerations, entry.keys(), "cases")
+    for holder in (*directives.added_cases, *directives.case_order):
+        known_type("add_case / reorder_cases", holder, set(enumerations), "enumeration")
+
+    for directive, group in (("rename_attachment", directives.attachment_renames),
+                             ("document_attachment", directives.attachment_docs),
+                             ("drop_attachment", directives.dropped_attachments),
+                             ("move_attachment", directives.attachment_namespaces)):
+        for identifier in group:
+            known_type(directive, identifier, attachments, "attachment")
+
+    for directive, group in (("rename_namespace", directives.namespace_names),
+                             ("remap_namespace", directives.namespace_uuids)):
+        for uuid in group:
+            known_type(directive, uuid, namespaces, "namespace (by uuid)")
+
+    if not findings:
+        return
+    raise ValueError(f"[unknown-target] {len(findings)} directive(s) name something the source "
+                     "schema does not hold, so they would do nothing at all:\n"
+                     + "\n".join(f"  {f}" for f in sorted(findings)) +
+                     "\nA directive names its target by its SOURCE name (the schema you migrate "
+                     "FROM), members by their source name too — check the spelling there.")
+
+
 def _format_drop_report(src, directives, refs_dropped):
     """Accumulate EVERY surviving reference to a `drop_type`'d type into one legible report;
     return the report string, or `None` if the drops dangle nothing. Sites: struct fields
@@ -1154,6 +1263,7 @@ def build_target_definitions(source_defs, directives):
                                  f"migration (it would carry stale source ids); use a "
                                  f"primitive-leaf default")
     src = _const(source_defs)
+    _refuse_unknown_targets(src, directives)      # a misspelt target would silently do nothing
     _validate_dimension_ops(src, directives)      # resize/transpose: direct-Vec/Mat + fill, up front
     target = V.Definitions()
     tmap = {}

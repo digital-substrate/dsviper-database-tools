@@ -505,6 +505,64 @@ class TestContainers(unittest.TestCase):
         self.assertEqual([10, 30], [V.ValueStructure.cast(v).at("val", encoded=False) for _, v in rx.items()])
 
 
+class TestUnknownTargets(unittest.TestCase):
+    """A directive names its target by its SOURCE name. A misspelling matches nothing, so the
+    directive never fires and the migration reports success having done nothing — the guard turns
+    that silence into one accumulated refusal, before anything is built."""
+
+    def _source(self):
+        defs = V.Definitions()
+        concept = defs.create_concept(NS, "Customer")
+        order = struct(defs, "Order", [("qty", T.INT32)])
+        enumeration = enum(defs, "Mode", ["A", "B"])
+        defs.create_attachment(NS, "orders", concept, order)
+        return defs, order, enumeration
+
+    def test_every_misspelling_is_accumulated_into_one_refusal(self):
+        defs, order, enumeration = self._source()
+        d = TransformationDirectives()
+        d.rename_type(f"{NS.name()}::Nope", f"{NS.name()}::X")
+        d.rename_field(order.representation(), "ghost", "g")
+        d.retype_field(f"{NS.name()}::Absent", "qty", T.INT64)
+        d.rename_case(enumeration.representation(), "Z", "Y")
+        d.drop_attachment("nope")
+        d.accept_attachment_drops()
+        with self.assertRaises(ValueError) as caught:
+            DefinitionsRewriter.from_directives(defs, d)
+        message = str(caught.exception)
+        self.assertIn("[unknown-target]", message)
+        self.assertIn("5 directive(s)", message)          # every site, not the first
+        self.assertIn("rename_type", message)
+        self.assertIn("no such field in", message)
+        self.assertIn("no such structure", message)       # the holder, reported once
+        self.assertNotIn("'qty'", message)                # ... and not its members too
+        self.assertIn("no such case in", message)
+        self.assertIn("no such attachment", message)
+
+    def test_a_faithful_migration_passes(self):
+        defs, order, enumeration = self._source()
+        d = TransformationDirectives()
+        d.rename_field(order.representation(), "qty", "count")
+        d.add_field(order.representation(), "note", V.ValueString("n/a"))
+        d.document_field(order.representation(), "note", "an ADDED field is a legal doc target")
+        d.rename_case(enumeration.representation(), "A", "Alpha")
+        d.rename_attachment(f"{NS.name()}::Customer.orders", "orderLog")   # by identifier
+        d.reorder_fields(order.representation(), ["note", "count"])        # TARGET names
+        _rw, target = DefinitionsRewriter.from_directives(defs, d)
+        self.assertEqual(["note", "count"],
+                         [f.name() for f in target.const().structures()[0].fields()])
+
+    def test_a_transform_type_the_schema_does_not_hold_is_not_refused(self):
+        # transform_type keys its source by runtimeId, and that type need not occur in the
+        # persistence schema — a composite used only in a function-pool signature is the case the
+        # source codemod exists to handle. It must not be caught by this guard.
+        defs, _order, _enumeration = self._source()
+        d = TransformationDirectives()
+        d.transform_type(V.TypeVector(T.UINT32), V.TypeSet(T.UINT32), lambda v, t: v)
+        _rw, target = DefinitionsRewriter.from_directives(defs, d)
+        self.assertTrue(target.const().structures())
+
+
 class TestAttachments(unittest.TestCase):
     def test_attachment_created_and_renamed(self):
         src = V.Definitions()
