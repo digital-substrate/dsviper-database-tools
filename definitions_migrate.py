@@ -517,12 +517,40 @@ def _drop_region_edits(edits, src, rstart, rend, block_stop):
             or (e.start == e.stop and rend <= e.start <= block_stop)))]
 
 
+def _match_brace(text: str, open_pos: int) -> int:
+    """Index of the ``}`` matching the ``{`` at ``open_pos``, counting braces but
+    skipping string and docstring bodies (a ``"has { brace"`` default or a docstring must
+    not throw off the depth). A ``{uuid}`` default is self-balancing, so it needs no care."""
+    depth, i, n = 0, open_pos, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            if text[i:i + 3] == '"""':                        # docstring — cannot contain """
+                close = text.find('"""', i + 3)
+                i = n if close < 0 else close + 3
+                continue
+            i += 1                                            # string literal — skip to closing "
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == '\\' else 1
+            i += 1
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
 def _relocate_moved_types(edits, directives, decl, source_map, resolve, files):
     if not directives.type_namespaces:
         return edits
-    where = {}                                                # namespace uuid -> a file it lives in
+    blocks = {}                                               # namespace uuid -> [(file, uuid_stop)]
     for ns in source_map.name_spaces():
-        where.setdefault(ns.name_space().uuid().representation(), resolve(ns.uuid_span())[0])
+        src, _s, ustop = resolve(ns.uuid_span())
+        blocks.setdefault(ns.name_space().uuid().representation(), []).append((src, ustop))
     for type_repr, target_ns in directives.type_namespaces.items():
         d = decl.get(type_repr)
         if d is None:
@@ -537,10 +565,18 @@ def _relocate_moved_types(edits, directives, decl, source_map, resolve, files):
                          [_Edit(e.source, e.start - carry_start, e.stop - carry_start,
                                 e.replacement, e.tidy) for e in internal])
         edits.append(_Edit(src_file, carry_start, bstop, "", tidy=True))   # cut it out
+
         uuid = target_ns.uuid().representation()
-        dest = where.get(uuid, src_file)
-        block = f"\nnamespace {target_ns.name()} {{{uuid}}} {{\n\n{carried}\n\n}};\n"
-        edits.append(_Edit(dest, len(files[dest]), len(files[dest]), block))
+        existing = blocks.get(uuid)
+        if existing:                                          # merge into a live namespace block
+            dest, ustop = next((b for b in existing if b[0] == src_file), existing[0])
+            text = files[dest]
+            close = _match_brace(text, text.index("{", ustop))     # this block's closing brace
+            line_begin = text.rfind("\n", 0, close) + 1
+            edits.append(_Edit(dest, line_begin, line_begin, carried + "\n\n"))
+        else:                                                 # split: a fresh block re-opens/creates Y
+            block = f"\nnamespace {target_ns.name()} {{{uuid}}} {{\n\n{carried}\n\n}};\n"
+            edits.append(_Edit(src_file, len(files[src_file]), len(files[src_file]), block))
     return edits
 
 

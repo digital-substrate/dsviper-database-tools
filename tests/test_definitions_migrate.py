@@ -326,10 +326,30 @@ class DefinitionsMigrateTest(unittest.TestCase):
             d.retype_field("N::Item", "code", V.Type.UINT32)   # retype a field of the moved type too
             return d
         out = self._run({"core.dsm": core, "model.dsm": model}, fn)
-        # the moved declaration carries its own edits: renamed + retyped, under namespace M
-        self.assertRegex(out["core.dsm"], r"namespace M \{44444444[^}]*\}[\s\S]*struct Widget \{ uint32 id; uint32 code; \}")
+        # merged INTO the live M block (not a second adjacent one), carrying its own edits
+        self.assertEqual(out["core.dsm"].count("namespace M {"), 1)
+        self.assertRegex(out["core.dsm"], r"struct Anchor[\s\S]*struct Widget \{ uint32 id; uint32 code; \}")
         self.assertIn("M::Widget first;", out["model.dsm"])    # reference: moved + renamed -> qualified
         self.assertNotIn("struct Item", out["model.dsm"])
+
+    def test_move_type_merge_is_brace_safe(self):
+        # the target block holds a docstring and a string default that both contain braces —
+        # the merge must find the block's real closing brace, not one inside a literal
+        core = ('namespace M {44444444-4444-4444-4444-444444444444} {\n\n'
+                '"""tricky doc with a { and a } brace"""\n'
+                'struct Anchor { string tag = "a } brace { here"; };\n\n'
+                '};\n')
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n'
+                 'struct Item { uint32 id; };\n};\n')
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.move_type("N::Item", _namespace(defs, "M"))
+            return d
+        out = self._run({"core.dsm": core, "model.dsm": model}, fn)
+        self.assertEqual(out["core.dsm"].count("namespace M {"), 1)
+        self.assertRegex(out["core.dsm"], r"struct Anchor[\s\S]*struct Item")   # merged inside, in order
 
     # -- reorder: rewrite the member region in the target order (a permutation) ----------
 
