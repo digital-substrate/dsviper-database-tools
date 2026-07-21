@@ -32,6 +32,11 @@ class TransformationDirectives:
         self.transposed_fields = {}     # src struct repr -> set(field)   (Mat<c,r> -> Mat<r,c>)
         self.transformed_fields = {}    # src struct repr -> {field -> (new_type, fn)}  (Class-C hook)
         self.transformed_types = {}     # src type runtimeId repr -> (new_type, fn)  (global Class-C hook)
+        self.transformed_type_names = {}  # ... -> the source type's representation, kept alongside:
+                                        # a runtimeId is a fingerprint, so a name-based consumer (a
+                                        # source codemod) could otherwise only recover the name by
+                                        # walking the schema — and would miss a type the schema does
+                                        # not reach (a composite used only in a pool signature).
         # documentation authoring (Class A — doc is outside the runtimeId; overrides the
         # source doc the build carries by default). Members named by SOURCE name.
         self.type_docs = {}             # type repr (struct/enum/concept/club) -> text
@@ -147,7 +152,9 @@ class TransformationDirectives:
         # Rides the target-directed recursion (the walk visits every node). A field-level
         # `transform_field` on the same position OVERRIDES this (resolution: field > type).
         # Same contract as `transform_field`: `fn(source_value, target_type) -> target_value`.
-        self.transformed_types[source_type.runtime_id().representation()] = (new_type, fn)
+        rid = source_type.runtime_id().representation()
+        self.transformed_types[rid] = (new_type, fn)
+        self.transformed_type_names[rid] = source_type.representation()
 
     # -- enum case shape changes (family 2) -----------------------------------
     def add_case(self, enum_repr, name):            # Class A — appended at end

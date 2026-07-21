@@ -10,8 +10,9 @@ a fresh target tree; the original is never mutated.
 
 The edits are span-precise. The parser (`dsviper >= 1.2.6`) yields a ``DSMSourceMap``
 alongside the parsed definitions: the exact source span of every declaration, field,
-case, namespace and *resolved* type-reference. Each directive maps to edits at those
-spans. The shipped ``rewrite/`` engine is reused only as the verification oracle:
+case, namespace and *resolved* type-reference, each declaration carrying its identity
+(``identifier()`` — ``NS::Name``, or ``NS::KeyConcept.name`` for an attachment). Each
+directive maps to edits at those spans. The shipped ``rewrite/`` engine is reused only as the verification oracle:
 re-parse the patched tree and compare its ``Definitions`` digest to the engine's target
 (``runtimeId`` is a structure fingerprint, so equal digests prove the patch faithful).
 
@@ -43,41 +44,12 @@ def _simple(qualified: str) -> str:
     return qualified.rsplit("::", 1)[-1]
 
 
-def _attachment_repr(identifier: str) -> str:
-    """An attachment directive names its target ``NS::KeyConcept.Name`` (e.g.
-    ``Shop::Customer.orders``); its source-map declaration is keyed like any type, ``NS::Name``
-    (``Shop::orders``). Map the identifier to that key: namespace before ``::``, name after the
-    last ``.``."""
-    namespace = identifier.split("::", 1)[0]
-    return f"{namespace}::{identifier.rsplit('.', 1)[-1]}"
-
-
-_ELEM_CAST = {"optional": V.TypeOptional, "vector": V.TypeVector, "set": V.TypeSet,
-              "xarray": V.TypeXArray, "key": V.TypeKey}
-
-
-def _walk_type(t, acc: dict) -> None:
-    """Record ``{runtimeId -> FQN representation}`` for ``t`` and every nested sub-type. The
-    transform_type directive keys its source by runtimeId (the engine's storage key); the source
-    layer is name-based, so this bridges a runtimeId back to the FQN a codemod matches on."""
-    acc.setdefault(t.runtime_id().representation(), t.representation())
-    tc = t.type_code()
-    if tc in _ELEM_CAST:
-        _walk_type(_ELEM_CAST[tc].cast(t).element_type(), acc)
-    elif tc == "map":
-        m = V.TypeMap.cast(t)
-        _walk_type(m.key_type(), acc)
-        _walk_type(m.element_type(), acc)
-    elif tc in ("tuple", "variant"):
-        cast = V.TypeTuple if tc == "tuple" else V.TypeVariant
-        for x in cast.cast(t).types():
-            _walk_type(x, acc)
-
-
 # -- span resolution: a global (content) offset -> (file, local offset) ----------------
 
 def _line_starts(text: str) -> list[int]:
-    """Byte offset of the start of each 1-based line (``out[line - 1]``)."""
+    """Character offset of the start of each 1-based line (``out[line - 1]``). A span's
+    offsets index ``builder.content()`` as a Python ``str`` — code points, not bytes — so a
+    non-ASCII docstring above a declaration does not shift the arithmetic."""
     starts = [0]
     for i, ch in enumerate(text):
         if ch == "\n":
@@ -88,8 +60,8 @@ def _line_starts(text: str) -> list[int]:
 class _Resolver:
     """Maps a ``DSMSourceSpan`` (global offsets into ``builder.content()``) to
     ``(source_file, local_start, local_stop)``. A file starts at a line boundary in the
-    assembled content, so its global base byte is the content offset of its first line;
-    the local offset is ``global - base`` (valid across multi-line spans)."""
+    assembled content, so its global base is the content offset of its first line; the
+    local offset is ``global - base`` (valid across multi-line spans)."""
 
     def __init__(self, builder):
         content_starts = _line_starts(builder.content())
@@ -224,8 +196,11 @@ def _render_field_line(name, value_or_type) -> str:
 # -- edit derivation: directives + source-map -> edits ---------------------------------
 
 def _index(source_map):
-    """Build lookup indices over the flat source-map lists."""
-    decl = {_repr(d.type_name()): d for d in source_map.declarations()}
+    """Build lookup indices over the flat source-map lists. A declaration is keyed by its
+    ``identifier()`` — the source map's own identity for it: ``NS::Name`` for a type, and
+    ``NS::KeyConcept.name`` for an attachment, whose key concept is part of its identity (one
+    namespace may hold two attachments of the same name)."""
+    decl = {d.identifier(): d for d in source_map.declarations()}
     field = {(_repr(f.structure()), f.name()): f for f in source_map.fields()}
     case = {(_repr(c.enumeration()), c.name()): c for c in source_map.cases()}
     return decl, field, case
@@ -259,10 +234,21 @@ def _insert_before_close(decl_span, member: str, resolve, files, member_span=Non
 def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> list[_Edit]:
     decl, field, case = _index(source_map)
     src_struct = {s.representation(): s for s in source_defs.structures()}
-    # attachment directives are keyed by the attachment's LOCAL name (the engine looks them up as
-    # `identifier().split(".")[-1]`); map that to its declaration key `NS::Name` in the source map.
-    att_repr = {a.identifier().split(".")[-1]: _attachment_repr(a.identifier())
-                for a in source_defs.attachments()}
+    # an attachment directive addresses its target by `identifier()` (`NS::KeyConcept.name`) —
+    # the attachment's identity, and the declaration's key — or, legacy, by the bare local name.
+    # A local name is NOT an identity (one namespace may hold `A.orders` and `B.orders`), so a
+    # legacy key that hits several attachments resolves to none of them here: the engine renames
+    # every homonym, this layer would patch one, and the digest refuses. Map the unambiguous ones.
+    att_repr = {}
+    ambiguous = set()
+    for a in source_defs.attachments():
+        att_repr[a.identifier()] = a.identifier()
+        local = a.identifier().rsplit(".", 1)[-1]
+        if local in att_repr:
+            ambiguous.add(local)
+        att_repr[local] = a.identifier()
+    for local in ambiguous:
+        del att_repr[local]
     edits: list[_Edit] = []
 
     def edit(span, replacement, tidy=False):
@@ -309,21 +295,16 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
             edits.append(_Edit(src_file, start, stop, replacement))
 
     # transform_type: a GLOBAL type substitution (source -> new_type, at every occurrence incl.
-    # nested). The directive keys the source by runtimeId (engine storage); the source layer is
-    # FQN, so bridge runtimeId -> FQN via source_defs' types, then rewrite each type OCCURRENCE
-    # whose FQN matches (source_map.types() spans the whole expression, composites included). A
-    # nested source's inner occurrence lands inside the outer replacement — overlap resolution
-    # keeps the outer one. A named source's declaration is dropped by the engine (hooked), so cut it.
+    # nested). The directive keys the source by runtimeId (engine storage) and records the source
+    # type's representation alongside, which is the name this layer matches on — every occurrence
+    # in source_map.types() whose representation matches is rewritten (the span covers the whole
+    # expression, composites included). A nested source's inner occurrence lands inside the outer
+    # replacement — overlap resolution keeps the outer one. A named source's declaration is dropped
+    # by the engine (hooked), so cut it.
     if directives.transformed_types:
-        rid_to_fqn: dict = {}
-        for named in (*source_defs.structures(), *source_defs.enumerations()):
-            rid_to_fqn[named.runtime_id().representation()] = named.representation()
-        for s in source_defs.structures():
-            for f in s.fields():
-                _walk_type(f.type(), rid_to_fqn)
-        fqn_to_new = {rid_to_fqn[rid]: new_type.representation()
+        fqn_to_new = {directives.transformed_type_names[rid]: new_type.representation()
                       for rid, (new_type, _fn) in directives.transformed_types.items()
-                      if rid in rid_to_fqn}
+                      if rid in directives.transformed_type_names}
         for occ in source_map.types():
             new_fqn = fqn_to_new.get(occ.representation())
             if new_fqn is not None:
@@ -350,10 +331,10 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
     # attachment rename: an attachment lives in `declarations()` too (the Converter records it),
     # and NOTHING references an attachment (a key is a concept-instance identity, not a foreign
     # key), so only its declaration name needs patching — no reference sweep. Keyed by local name.
-    for local_old, local_new in directives.attachment_renames.items():
-        d = decl.get(att_repr.get(local_old, ""))
+    for old_id, new_id in directives.attachment_renames.items():
+        d = decl.get(att_repr.get(old_id, ""))
         if d is not None:
-            edit(d.name_span(), local_new)
+            edit(d.name_span(), new_id.rsplit(".", 1)[-1])   # a new id may be written qualified
 
     # field type change (retype / transform / resize / transpose): replace the type
     # expression with the engine-computed target type — the single oracle for the shape.
@@ -377,8 +358,18 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
         for fname in fnames:
             f = field.get((struct_repr, fname))
             tf = tgt_field.get(renames.get(fname, fname))
-            if f is not None and tf is not None:
-                edit(f.type_span(), tf.type().representation(namespace=tns) + " ")
+            if f is None or tf is None:
+                continue
+            edit(f.type_span(), tf.type().representation(namespace=tns) + " ")
+            # a default was authored against the OLD type, so the engine does not carry it onto a
+            # type-changed field. Follow the engine (it is the authority on the shape): cut the
+            # `= <literal>` tail — the span from the field name's end to the declaration's end —
+            # or the text would declare a default the target definition does not have.
+            if tf.default_value() is None:
+                src, _nstart, nstop = resolve(f.name_span())
+                _dsrc, _dstart, dstop = resolve(f.declaration_span())
+                if dstop > nstop:
+                    edits.append(_Edit(src, nstop, dstop, ""))
 
     # namespace rename (display name) / remap (uuid): patch every occurrence of the
     # namespace declaration across the file split (a namespace may span several files).
@@ -428,8 +419,8 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
         members = [field[(struct_repr, n)].declaration_span()
                    for (sr, n) in field if sr == struct_repr]
         anchor = members[-1] if members else None
-        for name, payload, derive in adds:
-            line = _render_field_line(name, payload if derive is None else payload)
+        for name, payload, _derive in adds:
+            line = _render_field_line(name, payload)   # a Value (static) or a Type (derive=)
             e = _insert_before_close(d.block_span(), line, resolve, files, member_span=anchor)
             if e is not None:
                 edits.append(e)
@@ -623,7 +614,7 @@ def _match_brace(text: str, open_pos: int) -> int:
 
 def _relocate_moved_types(edits, directives, decl, source_map, resolve, files, att_repr):
     # types AND attachments move the same way (both are declarations); an attachment names its
-    # target by LOCAL name, resolved to the declaration key NS::Name via att_repr.
+    # target by identifier (or a legacy local name), resolved to the declaration key via att_repr.
     moves = [(t, ns) for t, ns in directives.type_namespaces.items()]
     moves += [(att_repr[i], ns) for i, ns in directives.attachment_namespaces.items()
               if i in att_repr]
@@ -765,13 +756,9 @@ def definitions_migrate(dsm_dir, transformation_module, out_dir, *, verify=True)
         by_file[e.source].append(e)
     patched = {name: _apply(text, by_file[name]) for name, text in files.items()}
 
-    # 5. write the fresh target tree
-    os.makedirs(out_dir, exist_ok=True)
-    for name, text in patched.items():
-        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as handle:
-            handle.write(text)
-
-    # 6. verify (oracle): re-parse the patched tree, compare the definitions digest
+    # 5. verify (oracle): re-parse the patched tree IN MEMORY, compare the definitions digest.
+    #    Before the write, not after: a failed verify must leave no target tree behind (the
+    #    codemod's twin of the data migration discarding a partial target).
     if verify:
         _vbuilder, vreport, vdefs = _parse(patched)
         if vreport.has_error():
@@ -783,6 +770,12 @@ def definitions_migrate(dsm_dir, transformation_module, out_dir, *, verify=True)
             raise AssertionError("verify failed: patched definitions digest "
                                  f"{vdefs.hexdigest()[:12]} != engine target "
                                  f"{target_digest[:12]}")
+
+    # 6. write the fresh target tree
+    os.makedirs(out_dir, exist_ok=True)
+    for name, text in patched.items():
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as handle:
+            handle.write(text)
 
     return report
 

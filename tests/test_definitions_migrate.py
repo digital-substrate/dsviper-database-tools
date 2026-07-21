@@ -149,6 +149,19 @@ class DefinitionsMigrateTest(unittest.TestCase):
         out = self._run({"shop.dsm": SHOP, "catalog.dsm": CATALOG}, fn)
         self.assertIn("uint32 legacy_code;", out["shop.dsm"])
 
+    def test_retype_drops_a_default_authored_against_the_old_type(self):
+        # `quantity` carries `= 1`. A default is part of the runtimeId and was authored under the
+        # source type, so the engine builds the retyped field bare — the patched text must follow,
+        # or the two disagree and the digest (which `_run` checks) refuses.
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.retype_field("Shop::Order", "quantity", V.Type.UINT64)
+            return d
+        out = self._run({"shop.dsm": SHOP, "catalog.dsm": CATALOG}, fn)
+        self.assertIn("uint64 quantity;", out["shop.dsm"])
+        self.assertNotIn("= 1", out["shop.dsm"])
+
     def test_resize_vec_field(self):
         def fn(defs):
             from dsviper_database_tools import TransformationDirectives
@@ -434,6 +447,51 @@ class DefinitionsMigrateTest(unittest.TestCase):
         # the moved attachment's key concept, staying in N, is re-qualified so it still resolves
         self.assertIn("attachment<N::Person, uint32> orders;", out["model.dsm"])
 
+    def test_attachment_addressed_by_identifier(self):
+        # `identifier()` (`NS::KeyConcept.name`) is the attachment's identity and the key the
+        # directive API names; the bare local name is the legacy form. Both reach the same
+        # declaration here, because this layer mirrors the engine's lookup.
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 'concept Person;\n\n'
+                 '"""orders placed"""\n'
+                 'attachment<Person, uint32> orders;\n\n'
+                 'attachment<Person, bool> flags;\n\n'
+                 '};\n')
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.rename_attachment("N::Person.orders", "purchaseOrders")
+            d.document_attachment("N::Person.orders", "re-documented")
+            d.drop_attachment("N::Person.flags")
+            d.accept_attachment_drops()
+            return d
+        out = self._run({"model.dsm": model}, fn)
+        self.assertIn('"""re-documented"""', out["model.dsm"])
+        self.assertIn("attachment<Person, uint32> purchaseOrders;", out["model.dsm"])
+        self.assertNotIn("flags", out["model.dsm"])
+
+    def test_two_attachments_of_one_namespace_sharing_a_name(self):
+        # An attachment's key concept is part of its identity, so one namespace may hold two
+        # attachments called `orders`. Only the identifier tells them apart — their declarations
+        # report the same `Shop::orders` type name — so each directive must reach exactly one.
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 'concept Customer;\nconcept Vendor;\n\n'
+                 'attachment<Customer, uint32> orders;\n\n'
+                 'attachment<Vendor, uint32> orders;\n\n'
+                 '};\n')
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.rename_attachment("N::Vendor.orders", "supplierOrders")
+            d.document_attachment("N::Customer.orders", "placed by a customer")
+            return d
+        out = self._run({"model.dsm": model}, fn)
+        self.assertIn("attachment<Customer, uint32> orders;", out["model.dsm"])
+        self.assertIn("attachment<Vendor, uint32> supplierOrders;", out["model.dsm"])
+        self.assertIn('"""placed by a customer"""', out["model.dsm"])
+
     # -- transform_type: a global type substitution at every occurrence, nested included -------
 
     def test_transform_type_primitive_named_and_composite(self):
@@ -464,6 +522,27 @@ class DefinitionsMigrateTest(unittest.TestCase):
         self.assertIn("N::B a;", body)                           # named -> fully qualified
         self.assertIn("vector<N::B> many;", body)
         self.assertNotIn("struct A {", body)                     # the engine drops the transformed decl
+
+    def test_transform_type_reaches_a_type_the_schema_does_not_hold(self):
+        # A composite used ONLY in a function-pool signature is in no `Definitions` (pools sit
+        # outside persistence) — so it cannot be found by walking the schema. The directive keeps
+        # its source type's representation next to the runtimeId, which is what makes the source
+        # layer able to name it at all. The digest is blind to pools, so assert on the text.
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 'struct Order { uint32 id; };\n\n'
+                 '};\n')
+        tools = ('function_pool Tools {8d5b40a5-f9a3-4d0e-83dd-90dd282d3cbe} {\n'
+                 '  uint32 count(vector<uint32> xs);\n'
+                 '};\n')
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.transform_type(V.TypeVector(V.Type.UINT32), V.TypeSet(V.Type.UINT32),
+                             lambda v, t: v)
+            return d
+        out = self._run({"model.dsm": model, "tools.dsm": tools}, fn)
+        self.assertIn("uint32 count(set<uint32> xs);", out["tools.dsm"])
 
 
 if __name__ == "__main__":
