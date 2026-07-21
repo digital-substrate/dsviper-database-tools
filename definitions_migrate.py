@@ -107,6 +107,12 @@ def _tidy_cut(text: str, start: int, stop: int) -> tuple[int, int]:
     while begin > 0 and text[begin - 1] in " \t":
         begin -= 1
     if begin == 0 or text[begin - 1] == "\n":
+        if begin >= 2 and text[begin - 2] == "\n":            # a blank line sits ABOVE the cut —
+            after = end                                       # collapse a blank line now left BELOW
+            while after < n and text[after] in " \t":
+                after += 1
+            if after < n and text[after] == "\n":
+                end = after + 1
         return begin, end
     return start, end
 
@@ -240,8 +246,9 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
     # digest ignores them, but the parser resolves them and the source-map captures them) —
     # rewritten to its target name, MIRRORING the source's qualification. A bare reference
     # (`Customer`) stays bare; a qualified one (`N::SI`, as pool signatures write) keeps its
-    # `NS::` prefix. Both a type rename (simple name) and a namespace rename (the prefix) are
-    # applied here, so a signature that outlives its type's renaming stays valid.
+    # `NS::` prefix. A type rename (simple name), a namespace rename (the prefix), and a
+    # move_type (both, and always fully-qualified) are applied here, so a signature that
+    # outlives its type's edit stays valid.
     for r in source_map.references():
         referent = r.referent()
         if referent is None:
@@ -251,13 +258,18 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
         ns_uuid = rns.uuid().representation()
         renamed_type = src_repr in directives.type_renames
         renamed_ns = ns_uuid in directives.namespace_names
-        if not (renamed_type or renamed_ns):                  # untouched (incl. every primitive)
+        moved = src_repr in directives.type_namespaces
+        if not (renamed_type or renamed_ns or moved):         # untouched (incl. every primitive)
             continue
         src_file, start, stop = resolve(r.span())
         original = files[src_file][start:stop]
         tgt_simple = _simple(directives.type_renames[src_repr]) if renamed_type else referent.name()
-        tgt_ns = directives.namespace_names.get(ns_uuid, rns.name())
-        replacement = (tgt_ns + "::" + tgt_simple) if "::" in original else tgt_simple
+        if moved:                                             # a bare `T` in the old namespace would
+            tgt_ns = directives.type_namespaces[src_repr].name()   # dangle — always qualify to Y::T
+            replacement = tgt_ns + "::" + tgt_simple
+        else:
+            tgt_ns = directives.namespace_names.get(ns_uuid, rns.name())
+            replacement = (tgt_ns + "::" + tgt_simple) if "::" in original else tgt_simple
         if replacement != original:
             edits.append(_Edit(src_file, start, stop, replacement))
 
@@ -330,6 +342,11 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
             f = field.get((struct_repr, fname))
             if f is not None:
                 doc_edit(f.documentation_span(), f.declaration_span(), text)
+    for enum_repr, docs in directives.case_docs.items():
+        for cname, text in docs.items():
+            c = case.get((enum_repr, cname))
+            if c is not None:
+                doc_edit(c.documentation_span(), c.name_span(), text)
 
     # add a field: render it and splice before the struct's closing brace
     for struct_repr, adds in directives.added_fields.items():
@@ -379,7 +396,152 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
             if f is not None:
                 edit(f.declaration_span(), "", tidy=True)
 
+    # reorder fields / cases: rewrite the member region in the TARGET order (a full permutation
+    # of the target member set), each member carrying its own baked-in edits. Before move, so a
+    # reordered+moved declaration's region edit is picked up as the moved text's internal edit.
+    edits = _reorder_fields(edits, directives, decl, field, resolve, files)
+    edits = _reorder_cases(edits, directives, decl, case, resolve, files)
+
+    # move_type: relocate a whole declaration to a different namespace. Its text (docstring +
+    # block, with any of its OWN edits — a rename/retype of the moved type — baked in) is CUT
+    # from its source namespace block and spliced into the target: a fresh `namespace Y {uuid}`
+    # block appended to a file where Y already lives, else to the declaration's own file (two
+    # adjacent blocks for one namespace re-open it — valid DSM). References were re-qualified
+    # to Y:: above. Run last, so a moved declaration's internal edits are already in `edits`.
+    edits = _relocate_moved_types(edits, directives, decl, source_map, resolve, files)
+
     return _resolve_overlaps(edits)
+
+
+# -- reorder: rewrite a declaration's member region in the target order --------------------
+
+def _line_indent(text: str, pos: int) -> str:
+    """The leading whitespace of the line containing ``pos``."""
+    line_begin = text.rfind("\n", 0, pos) + 1
+    i = line_begin
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    return text[line_begin:i]
+
+
+def _field_unit(f, resolve, files):
+    """A field's full text extent: [docstring-or-declaration start, past the ``;``]."""
+    src, dstart, dstop = resolve(f.declaration_span())
+    text = files[src]
+    end = dstop
+    while end < len(text) and text[end] in " \t":
+        end += 1
+    if end < len(text) and text[end] == ";":
+        end += 1
+    doc = f.documentation_span()
+    start = resolve(doc)[1] if doc is not None else dstart
+    return src, start, end
+
+
+def _case_unit(c, resolve, files):
+    """A case's full text extent: [docstring-or-name start, name end] (the comma is excluded)."""
+    src, nstart, nstop = resolve(c.name_span())
+    doc = c.documentation_span()
+    start = resolve(doc)[1] if doc is not None else nstart
+    return src, start, nstop
+
+
+def _bake(edits, src, start, stop, files):
+    """The text of ``files[src][start:stop]`` with the edits falling inside it applied
+    (rebased to local offsets) — a member carries its own rename/retype into its new slot."""
+    inside = [e for e in edits if e.source == src and start <= e.start and e.stop <= stop]
+    return _apply(files[src][start:stop],
+                  [_Edit(e.source, e.start - start, e.stop - start, e.replacement, e.tidy)
+                   for e in inside])
+
+
+def _reorder_fields(edits, directives, decl, field, resolve, files):
+    for struct_repr, order in directives.field_order.items():
+        d = decl.get(struct_repr)
+        if d is None:
+            continue
+        units = [(f, _field_unit(f, resolve, files))
+                 for (sr, _n), f in field.items() if sr == struct_repr]
+        if not units:
+            continue
+        renames = directives.field_renames.get(struct_repr, {})
+        dropped = directives.dropped_fields.get(struct_repr, set())
+        src = units[0][1][0]
+        rstart = min(u[1][1] for u in units)
+        rend = max(u[1][2] for u in units)
+        block_stop = resolve(d.block_span())[2]
+        texts = {renames.get(f.name(), f.name()): _bake(edits, s, us, ue, files)
+                 for f, (s, us, ue) in units if f.name() not in dropped}
+        for name, payload, _derive in directives.added_fields.get(struct_repr, []):
+            texts[name] = _render_field_line(name, payload)
+        if set(order) != set(texts):
+            raise ValueError(f"reorder_fields({struct_repr}) not a permutation of {sorted(texts)}")
+        edits = _drop_region_edits(edits, src, rstart, rend, block_stop)
+        indent = _line_indent(files[src], rstart)
+        edits.append(_Edit(src, rstart, rend, ("\n" + indent).join(texts[n] for n in order)))
+    return edits
+
+
+def _reorder_cases(edits, directives, decl, case, resolve, files):
+    for enum_repr, order in directives.case_order.items():
+        d = decl.get(enum_repr)
+        if d is None:
+            continue
+        units = [(c, _case_unit(c, resolve, files))
+                 for (er, _n), c in case.items() if er == enum_repr]
+        if not units:
+            continue
+        renames = directives.case_renames.get(enum_repr, {})
+        removed = directives.removed_cases.get(enum_repr, {})
+        src = units[0][1][0]
+        rstart = min(u[1][1] for u in units)
+        rend = max(u[1][2] for u in units)
+        block_stop = resolve(d.block_span())[2]
+        texts = {renames.get(c.name(), c.name()): _bake(edits, s, us, ue, files)
+                 for c, (s, us, ue) in units if c.name() not in removed}
+        for name in directives.added_cases.get(enum_repr, []):
+            texts[name] = name
+        if set(order) != set(texts):
+            raise ValueError(f"reorder_cases({enum_repr}) not a permutation of {sorted(texts)}")
+        edits = _drop_region_edits(edits, src, rstart, rend, block_stop)
+        indent = _line_indent(files[src], rstart)
+        edits.append(_Edit(src, rstart, rend, (",\n" + indent).join(texts[n] for n in order)))
+    return edits
+
+
+def _drop_region_edits(edits, src, rstart, rend, block_stop):
+    """Remove edits superseded by a region rewrite: everything inside the member region (baked
+    into the member texts), and the add-member insertions past it (their text is now in order)."""
+    return [e for e in edits if not (e.source == src and (
+            (rstart <= e.start and e.stop <= rend)
+            or (e.start == e.stop and rend <= e.start <= block_stop)))]
+
+
+def _relocate_moved_types(edits, directives, decl, source_map, resolve, files):
+    if not directives.type_namespaces:
+        return edits
+    where = {}                                                # namespace uuid -> a file it lives in
+    for ns in source_map.name_spaces():
+        where.setdefault(ns.name_space().uuid().representation(), resolve(ns.uuid_span())[0])
+    for type_repr, target_ns in directives.type_namespaces.items():
+        d = decl.get(type_repr)
+        if d is None:
+            continue
+        src_file, bstart, bstop = resolve(d.block_span())
+        doc = d.documentation_span()
+        carry_start = resolve(doc)[1] if doc is not None else bstart
+        internal = [e for e in edits                          # this declaration's own edits
+                    if e.source == src_file and carry_start <= e.start and e.stop <= bstop]
+        edits = [e for e in edits if e not in internal]       # they travel with the text, not the hole
+        carried = _apply(files[src_file][carry_start:bstop],
+                         [_Edit(e.source, e.start - carry_start, e.stop - carry_start,
+                                e.replacement, e.tidy) for e in internal])
+        edits.append(_Edit(src_file, carry_start, bstop, "", tidy=True))   # cut it out
+        uuid = target_ns.uuid().representation()
+        dest = where.get(uuid, src_file)
+        block = f"\nnamespace {target_ns.name()} {{{uuid}}} {{\n\n{carried}\n\n}};\n"
+        edits.append(_Edit(dest, len(files[dest]), len(files[dest]), block))
+    return edits
 
 
 def _render_doc(text: str) -> str:
@@ -392,10 +554,10 @@ def _render_doc(text: str) -> str:
 
 
 def _reindent(block: str, indent: str) -> str:
-    """Indent every line of a multi-line block, terminating with a newline + indent so
-    the following (anchor) line keeps its indentation."""
-    lines = block.splitlines()
-    return "".join(indent + ln + "\n" for ln in lines) + indent
+    """Prefix every line of a docstring block with ``indent`` and a trailing newline. It is
+    spliced at the anchor's line start (before the anchor's own indent), so the anchor line
+    keeps its existing indentation — no trailing indent here, or it would double."""
+    return "".join(indent + line + "\n" for line in block.splitlines())
 
 
 # -- the migration ---------------------------------------------------------------------
@@ -420,10 +582,9 @@ def _parse(files: dict[str, str], source_map=None):
 # directives this codemod does not yet patch — refused up front (fail closed and early,
 # the project's north star) rather than left to the digest oracle to reject after the fact.
 _UNSUPPORTED = {
-    "field_order": "field reorder", "case_order": "case reorder",
-    "type_namespaces": "move_type", "attachment_namespaces": "move_attachment",
+    "attachment_namespaces": "move_attachment",
     "attachment_renames": "rename_attachment", "attachment_docs": "document_attachment",
-    "dropped_attachments": "drop_attachment", "case_docs": "document_case",
+    "dropped_attachments": "drop_attachment",
     "transformed_types": "transform_type",
 }
 
