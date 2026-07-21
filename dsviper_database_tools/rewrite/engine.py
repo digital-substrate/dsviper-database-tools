@@ -1347,11 +1347,11 @@ def build_target_definitions(source_defs, directives):
                     elif f.name() in retypes:                       # family 2: retype
                         ftype = retypes[f.name()][0]
                     else:                                           # carried (kept or renamed): same type
-                        default = f.default_value()                 # carry a domain-free source default: a
-                        if default is not None and _default_domain_free(f.type()):  # non-zero default is part
-                            ftype = V.Value.create(f.type(), default)  # of the runtimeId (like documentation),
-                        else:                                       # so a plain carry must keep it; a named-type
-                            ftype = map_t(f.type())                 # default would carry stale ids — type alone
+                        default = f.default_value()                 # carry a domain-free source default (part of
+                        if default is not None and _default_domain_free(f.type()):  # the runtimeId, like a doc):
+                            ftype = V.Value.create(map_t(f.type()), default)  # under the MAPPED type, so a
+                        else:                                       # transform_type/remap of the default's own
+                            ftype = map_t(f.type())                 # type flows through it, not just the field
                     fields.append((fren.get(f.name(), f.name()), ftype,
                                    fdocs.get(f.name(), f.documentation())))
                 for name, payload, derive in adds:                  # family 2: add (static or derived)
