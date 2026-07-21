@@ -119,7 +119,7 @@ explains the loss model and when to reach for each; this section is the exact re
 | `rename_type(old, new)` | rename a struct / enum / concept / club (FQN → FQN) |
 | `rename_field(struct, old, new)` | rename a struct field |
 | `rename_case(enum, old, new)` | rename an enum case |
-| `rename_attachment(old_id, new_id)` | rename an attachment (its local name) |
+| `rename_attachment(old_id, new_id)` | rename an attachment — address it by `identifier()` (`NS::KeyConcept.name`); a bare local name is accepted but is not unique, so it renames every attachment of that name |
 
 **Namespaces** — two orthogonal axes, plus per-definition moves for split / merge:
 

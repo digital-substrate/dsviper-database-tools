@@ -522,6 +522,36 @@ class TestAttachments(unittest.TestCase):
         r = rewriter.value(V.ValueStructure(s_doc, {"qty": 5}))
         self.assertEqual(5, r.at("count", encoded=False))
 
+    def test_attachment_directives_address_it_by_identifier(self):
+        # An attachment's identity is its `identifier()` — `NS::KeyConcept.name` — which is what
+        # the directive parameters name (`old_id`, `identifier`). The bare local name still works
+        # (legacy), but it is not an identity: two concepts in one namespace may each carry an
+        # attachment of the same name, and a local-name directive then hits every homonym.
+        src = V.Definitions()
+        customer = src.create_concept(NS, "Customer")
+        vendor = src.create_concept(NS, "Vendor")
+        order = struct(src, "Order", [("qty", T.INT32)])
+        src.create_attachment(NS, "orders", customer, order, documentation="by customer")
+        src.create_attachment(NS, "orders", vendor, order)
+        self.assertEqual({f"{NS.name()}::Customer.orders", f"{NS.name()}::Vendor.orders"},
+                         {a.identifier() for a in src.const().attachments()})
+
+        d = TransformationDirectives()
+        d.rename_attachment(f"{NS.name()}::Vendor.orders", "supplierOrders")   # ONE of the two
+        d.document_attachment(f"{NS.name()}::Customer.orders", "kept, re-documented")
+        _rw, target = DefinitionsRewriter.from_directives(src, d)
+        by_id = {a.identifier(): a for a in target.const().attachments()}
+        self.assertEqual({f"{NS.name()}::Customer.orders", f"{NS.name()}::Vendor.supplierOrders"},
+                         set(by_id))
+        self.assertEqual("kept, re-documented",
+                         by_id[f"{NS.name()}::Customer.orders"].documentation())
+
+        legacy = TransformationDirectives()
+        legacy.rename_attachment("orders", "everyOne")      # the local name: ambiguous, hits both
+        _rw, target = DefinitionsRewriter.from_directives(src, legacy)
+        self.assertEqual({f"{NS.name()}::Customer.everyOne", f"{NS.name()}::Vendor.everyOne"},
+                         {a.identifier() for a in target.const().attachments()})
+
 
 class TestKeyFlavors(unittest.TestCase):
     """A ValueKey is (typeKey, typeConcept, instanceId), typeKey = Key<X> with

@@ -982,6 +982,29 @@ class DefinitionsRewriter:
         return self.att_map[a.runtime_id().representation()]
 
 
+# -- addressing an attachment in a directive -------------------------------------
+#    An attachment's identity is its `identifier()` — `NS::KeyConcept.name` — and that is what
+#    the directive API names (`rename_attachment(old_id, ...)`, `drop_attachment(identifier)`).
+#    The bare local name is accepted as a legacy key, but it is NOT an identity: two concepts in
+#    one namespace may each carry an attachment of the same name (`N::Customer.orders` and
+#    `N::Vendor.orders`), and a directive written that way addresses every homonym at once.
+#    Prefer the identifier; a name-based consumer (a source codemod) can only mirror that one.
+def _att_keys(a):
+    identifier = a.identifier()
+    return identifier, identifier.rsplit(".", 1)[-1]
+
+
+def _att_get(mapping, a, default=None):
+    for key in _att_keys(a):
+        if key in mapping:
+            return mapping[key]
+    return default
+
+
+def _att_hit(container, a):
+    return any(key in container for key in _att_keys(a))
+
+
 # -- an add_field default lives in a TARGET field but is authored against the
 #    SOURCE domain: it is only expressible across a migration if it references no
 #    named (migrated) type — a primitive leaf or a container of such. A default
@@ -1097,12 +1120,12 @@ def _format_drop_report(src, directives, refs_dropped):
                                  m.representation()))
 
     for a in src.attachments():
-        if a.identifier().split(".")[-1] in dropped_atts:
+        if _att_hit(dropped_atts, a):
             continue
         for label, tt in (("key", a.key_type()), ("document", a.document_type())):
             hit = refs_dropped(tt)
             if hit:
-                findings.append((f"attachment {a.identifier().split('.')[-1]}",
+                findings.append((f"attachment {a.identifier()}",
                                  f"{label} type : {tt.representation()}", hit))
 
     if not findings:
@@ -1150,7 +1173,7 @@ def build_target_definitions(source_defs, directives):
         return V.NameSpace(new_uuid, new_name)
 
     def att_ns(a):                           # attachment namespace: per-attachment move, else bulk
-        ov = directives.attachment_namespaces.get(a.identifier().split(".")[-1])
+        ov = _att_get(directives.attachment_namespaces, a)
         return ov if ov is not None else tgt_ns(a)
 
     ELEM = {"optional": V.TypeOptional, "vector": V.TypeVector, "set": V.TypeSet,
@@ -1379,14 +1402,14 @@ def build_target_definitions(source_defs, directives):
     # attachments — a named Map<Key, Document>: remap key + document types, rename id
     att_map = {}
     for a in src.attachments():
-        local = a.identifier().split(".")[-1]            # identifier() is fully-qualified
-        if local in dropped_atts:                        # drop_attachment: not recreated
+        if _att_hit(dropped_atts, a):                    # drop_attachment: not recreated
             continue
-        name = directives.attachment_renames.get(local, local)
-        na = target.create_attachment(att_ns(a), name,
-                                      map_t(a.key_type()), map_t(a.document_type()),
-                                      documentation=directives.attachment_docs.get(
-                                          local, a.documentation()))
+        local = a.identifier().rsplit(".", 1)[-1]        # identifier() is NS::KeyConcept.name
+        renamed = _att_get(directives.attachment_renames, a, local)
+        na = target.create_attachment(att_ns(a), renamed.rsplit(".", 1)[-1],   # a new id may be
+                                      map_t(a.key_type()), map_t(a.document_type()),  # qualified
+                                      documentation=_att_get(directives.attachment_docs, a,
+                                                             a.documentation()))
         att_map[a.runtime_id().representation()] = na
 
     return target, tmap, att_map

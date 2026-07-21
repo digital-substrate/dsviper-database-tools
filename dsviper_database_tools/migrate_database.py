@@ -22,6 +22,7 @@ import dsviper as V
 
 from .blobs import copy_blob
 from .rewrite import DefinitionsRewriter, Unrepresentable, DiagnosticSink
+from .rewrite.engine import _att_hit
 
 
 class VerificationError(Exception):
@@ -231,7 +232,7 @@ def _transform_pass(source, rewriter, sink, diag=None, progress=None):
     rewriter._sink = diag
     rewriter._source_view = source.attachment_getting()
     atts = [a for a in source.definitions().attachments()
-            if a.identifier().split(".")[-1] not in rewriter.d.dropped_attachments]  # dropped: deleted
+            if not _att_hit(rewriter.d.dropped_attachments, a)]              # dropped: deleted
     try:
         for att_i, att in enumerate(atts):
             if progress is not None:
@@ -281,7 +282,7 @@ def migrate(source, rewriter, target, on_progress=None):
     copied = set()                                     # blob-id reprs copied this run (target starts fresh)
     with _source_snapshot(source):                     # one consistent view of the mutable source
         live_atts = [a for a in source.definitions().attachments()
-                     if a.identifier().split(".")[-1] not in rewriter.d.dropped_attachments]
+                     if not _att_hit(rewriter.d.dropped_attachments, a)]
         progress = _Progress(on_progress, source.blob_statistics().total_size(), len(live_atts))
         target.begin_transaction(V.Databasing.TRANSACTION_EXCLUSIVE)
 
@@ -340,7 +341,7 @@ def verify(source, rewriter, target):
     rewriter._source_view = source.attachment_getting()
     try:
         for att in source.definitions().attachments():
-            if att.identifier().split(".")[-1] in rewriter.d.dropped_attachments:
+            if _att_hit(rewriter.d.dropped_attachments, att):
                 continue                                   # dropped attachment: no target image
             tgt_att = rewriter.attachment(att)
             keys = source.keys(att)

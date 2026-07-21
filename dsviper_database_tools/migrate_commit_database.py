@@ -22,6 +22,7 @@ import dsviper as V
 
 from .blobs import copy_blob
 from .rewrite import DefinitionsRewriter, Unrepresentable, DiagnosticSink
+from .rewrite.engine import _att_hit
 from .migrate_database import (
     VerificationError, _remove_db_file, _refuse_unacknowledged_attachment_drops)
 
@@ -161,7 +162,7 @@ def _addresses_dropped_attachment(op, source_defs, dropped):
     so the opcode is not re-issued (skipped). The CommitDatabase parity of silo 2 skipping a
     dropped attachment's documents: uniform over the whole partition (no partial state), and
     keys are not foreign keys (nothing dangles)."""
-    return bool(dropped) and op.arguments(source_defs)[0].identifier().split(".")[-1] in dropped
+    return bool(dropped) and _att_hit(dropped, op.arguments(source_defs)[0])
 
 
 def _replay_opcodes(ops, am, rewriter, source_defs, ensure_blobs):
