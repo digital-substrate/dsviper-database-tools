@@ -43,6 +43,15 @@ def _simple(qualified: str) -> str:
     return qualified.rsplit("::", 1)[-1]
 
 
+def _attachment_repr(identifier: str) -> str:
+    """An attachment directive names its target ``NS::KeyConcept.Name`` (e.g.
+    ``Shop::Customer.orders``); its source-map declaration is keyed like any type, ``NS::Name``
+    (``Shop::orders``). Map the identifier to that key: namespace before ``::``, name after the
+    last ``.``."""
+    namespace = identifier.split("::", 1)[0]
+    return f"{namespace}::{identifier.rsplit('.', 1)[-1]}"
+
+
 # -- span resolution: a global (content) offset -> (file, local offset) ----------------
 
 def _line_starts(text: str) -> list[int]:
@@ -228,6 +237,10 @@ def _insert_before_close(decl_span, member: str, resolve, files, member_span=Non
 def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> list[_Edit]:
     decl, field, case = _index(source_map)
     src_struct = {s.representation(): s for s in source_defs.structures()}
+    # attachment directives are keyed by the attachment's LOCAL name (the engine looks them up as
+    # `identifier().split(".")[-1]`); map that to its declaration key `NS::Name` in the source map.
+    att_repr = {a.identifier().split(".")[-1]: _attachment_repr(a.identifier())
+                for a in source_defs.attachments()}
     edits: list[_Edit] = []
 
     def edit(span, replacement, tidy=False):
@@ -286,6 +299,14 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
             c = case.get((enum_repr, old))
             if c is not None:
                 edit(c.name_span(), new)
+
+    # attachment rename: an attachment lives in `declarations()` too (the Converter records it),
+    # and NOTHING references an attachment (a key is a concept-instance identity, not a foreign
+    # key), so only its declaration name needs patching — no reference sweep. Keyed by local name.
+    for local_old, local_new in directives.attachment_renames.items():
+        d = decl.get(att_repr.get(local_old, ""))
+        if d is not None:
+            edit(d.name_span(), local_new)
 
     # field type change (retype / transform / resize / transpose): replace the type
     # expression with the engine-computed target type — the single oracle for the shape.
@@ -347,6 +368,10 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
             c = case.get((enum_repr, cname))
             if c is not None:
                 doc_edit(c.documentation_span(), c.name_span(), text)
+    for local, text in directives.attachment_docs.items():
+        d = decl.get(att_repr.get(local, ""))
+        if d is not None:
+            doc_edit(d.documentation_span(), d.block_span(), text)
 
     # add a field: render it and splice before the struct's closing brace
     for struct_repr, adds in directives.added_fields.items():
@@ -384,10 +409,15 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
                 start, stop = _tidy_cut_case(files[src], start, stop)
                 edits.append(_Edit(src, start, stop, ""))
 
-    # drop type: cut the whole declaration block
+    # drop type / drop attachment: cut the whole declaration block (attachments are declarations
+    # too; nothing references one, so a cut dangles nothing)
     for type_repr in directives.dropped_types:
         if type_repr in decl:
             edit(decl[type_repr].block_span(), "", tidy=True)
+    for local in directives.dropped_attachments:
+        d = decl.get(att_repr.get(local, ""))
+        if d is not None:
+            edit(d.block_span(), "", tidy=True)
 
     # drop field: cut the whole field declaration
     for struct_repr, dropped in directives.dropped_fields.items():
@@ -408,7 +438,7 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
     # block appended to a file where Y already lives, else to the declaration's own file (two
     # adjacent blocks for one namespace re-open it — valid DSM). References were re-qualified
     # to Y:: above. Run last, so a moved declaration's internal edits are already in `edits`.
-    edits = _relocate_moved_types(edits, directives, decl, source_map, resolve, files)
+    edits = _relocate_moved_types(edits, directives, decl, source_map, resolve, files, att_repr)
 
     return _resolve_overlaps(edits)
 
@@ -544,29 +574,57 @@ def _match_brace(text: str, open_pos: int) -> int:
     return -1
 
 
-def _relocate_moved_types(edits, directives, decl, source_map, resolve, files):
-    if not directives.type_namespaces:
+def _relocate_moved_types(edits, directives, decl, source_map, resolve, files, att_repr):
+    # types AND attachments move the same way (both are declarations); an attachment names its
+    # target by LOCAL name, resolved to the declaration key NS::Name via att_repr.
+    moves = [(t, ns) for t, ns in directives.type_namespaces.items()]
+    moves += [(att_repr[i], ns) for i, ns in directives.attachment_namespaces.items()
+              if i in att_repr]
+    if not moves:
         return edits
     blocks = {}                                               # namespace uuid -> [(file, uuid_stop)]
     for ns in source_map.name_spaces():
         src, _s, ustop = resolve(ns.uuid_span())
         blocks.setdefault(ns.name_space().uuid().representation(), []).append((src, ustop))
-    for type_repr, target_ns in directives.type_namespaces.items():
+    target_of = {t: ns.uuid().representation() for t, ns in moves}   # repr -> its target ns uuid
+    for type_repr, target_ns in moves:
         d = decl.get(type_repr)
         if d is None:
             continue
         src_file, bstart, bstop = resolve(d.block_span())
         doc = d.documentation_span()
         carry_start = resolve(doc)[1] if doc is not None else bstart
+        target_uuid = target_ns.uuid().representation()
         internal = [e for e in edits                          # this declaration's own edits
                     if e.source == src_file and carry_start <= e.start and e.stop <= bstop]
+        # a reference inside the moved declaration to a type NOT landing in the target namespace
+        # (e.g. an attachment's key concept, staying behind) would dangle once the declaration is
+        # in Y — a bare `Person` no longer resolves. Qualify those (the reference pass only touched
+        # renamed/moved referents; an unchanged staying sibling needs this).
+        for r in source_map.references():
+            referent = r.referent()
+            if referent is None or not referent.name_space().name():   # skip primitives
+                continue
+            rsrc, rstart, rstop = resolve(r.span())
+            if rsrc != src_file or not (carry_start <= rstart and rstop <= bstop):
+                continue
+            rns = referent.name_space()
+            rrepr = f"{rns.name()}::{referent.name()}"
+            eff_uuid = target_of.get(rrepr, rns.uuid().representation())
+            original = files[rsrc][rstart:rstop]
+            if eff_uuid == target_uuid or "::" in original:    # lands in target, or already qualified
+                continue
+            if any(rstart < e.stop and e.start < rstop for e in internal):   # already edited
+                continue
+            ns_name = directives.namespace_names.get(rns.uuid().representation(), rns.name())
+            internal.append(_Edit(rsrc, rstart, rstop, ns_name + "::" + referent.name()))
         edits = [e for e in edits if e not in internal]       # they travel with the text, not the hole
         carried = _apply(files[src_file][carry_start:bstop],
                          [_Edit(e.source, e.start - carry_start, e.stop - carry_start,
                                 e.replacement, e.tidy) for e in internal])
         edits.append(_Edit(src_file, carry_start, bstop, "", tidy=True))   # cut it out
 
-        uuid = target_ns.uuid().representation()
+        uuid = target_uuid
         existing = blocks.get(uuid)
         if existing:                                          # merge into a live namespace block
             dest, ustop = next((b for b in existing if b[0] == src_file), existing[0])
@@ -618,10 +676,7 @@ def _parse(files: dict[str, str], source_map=None):
 # directives this codemod does not yet patch — refused up front (fail closed and early,
 # the project's north star) rather than left to the digest oracle to reject after the fact.
 _UNSUPPORTED = {
-    "attachment_namespaces": "move_attachment",
-    "attachment_renames": "rename_attachment", "attachment_docs": "document_attachment",
-    "dropped_attachments": "drop_attachment",
-    "transformed_types": "transform_type",
+    "transformed_types": "transform_type",   # a global value hook — a whole-tree reference sweep
 }
 
 

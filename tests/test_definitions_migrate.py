@@ -392,13 +392,55 @@ class DefinitionsMigrateTest(unittest.TestCase):
         self.assertLess(body.index("pending"), body.index("shipped"))
         self.assertIn('"""being shipped"""', body)                       # the case's doc travelled with it
 
+    # -- attachments: declarations too, so the same machinery patches them ---------------
+
+    def test_attachment_operations(self):
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 '"""A person."""\n'
+                 'concept Person;\n\n'
+                 '"""orders placed"""\n'
+                 'attachment<Person, uint32> orders;\n\n'
+                 'attachment<Person, bool> flags;\n\n'
+                 '};\n')
+
+        def rename(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.rename_attachment("orders", "purchaseOrders")    # keyed by LOCAL name
+            return d
+
+        def drop(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.drop_attachment("flags")
+            d.accept_attachment_drops()
+            return d
+
+        def move(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            cat = V.NameSpace(V.ValueUUId("33333333-3333-3333-3333-333333333333"), "Cat")
+            d.move_attachment("orders", cat)
+            return d
+
+        out = self._run({"model.dsm": model}, rename)
+        self.assertIn("attachment<Person, uint32> purchaseOrders;", out["model.dsm"])
+
+        out = self._run({"model.dsm": model}, drop)
+        self.assertNotIn("flags", out["model.dsm"])
+
+        out = self._run({"model.dsm": model}, move)
+        self.assertIn("namespace Cat {33333333-3333-3333-3333-333333333333}", out["model.dsm"])
+        # the moved attachment's key concept, staying in N, is re-qualified so it still resolves
+        self.assertIn("attachment<N::Person, uint32> orders;", out["model.dsm"])
+
     # -- fail closed on a directive the codemod does not yet patch -----------------------
 
     def test_unsupported_directive_is_refused(self):
         def fn(defs):
             from dsviper_database_tools import TransformationDirectives
             d = TransformationDirectives()
-            d.rename_attachment("Shop::orders", "Shop::purchase_orders")   # attachments are out of scope
+            d.transform_type(V.Type.UINT32, V.Type.UINT64, lambda v, t: v)   # a global value hook
             return d
         with self.assertRaises(NotImplementedError):
             self._run({"shop.dsm": SHOP, "catalog.dsm": CATALOG}, fn)
