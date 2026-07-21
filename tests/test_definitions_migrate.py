@@ -434,16 +434,36 @@ class DefinitionsMigrateTest(unittest.TestCase):
         # the moved attachment's key concept, staying in N, is re-qualified so it still resolves
         self.assertIn("attachment<N::Person, uint32> orders;", out["model.dsm"])
 
-    # -- fail closed on a directive the codemod does not yet patch -----------------------
+    # -- transform_type: a global type substitution at every occurrence, nested included -------
 
-    def test_unsupported_directive_is_refused(self):
+    def test_transform_type_primitive_named_and_composite(self):
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 'struct A { uint32 x; };\n'
+                 'struct B { uint32 x; float y; };\n'
+                 'struct S {\n'
+                 '    uint16 count = 3;\n'                        # primitive, with a default
+                 '    map<uint16, vector<int32>> grid;\n'         # nested primitive + nested composite
+                 '    A a;\n'                                     # named
+                 '    vector<A> many;\n'
+                 '};\n\n'
+                 '};\n')
+
         def fn(defs):
             from dsviper_database_tools import TransformationDirectives
+            a = next(s for s in defs.structures() if s.representation() == "N::A")
+            b = next(s for s in defs.structures() if s.representation() == "N::B")
             d = TransformationDirectives()
-            d.transform_type(V.Type.UINT32, V.Type.UINT64, lambda v, t: v)   # a global value hook
+            d.transform_type(V.Type.UINT16, V.Type.UINT32, lambda v, t: v)          # primitive, everywhere
+            d.transform_type(V.TypeVector(V.Type.INT32), V.TypeSet(V.Type.INT32), lambda v, t: v)  # composite
+            d.transform_type(a, b, lambda v, t: v)                                   # named A -> B
             return d
-        with self.assertRaises(NotImplementedError):
-            self._run({"shop.dsm": SHOP, "catalog.dsm": CATALOG}, fn)
+        out = self._run({"model.dsm": model}, fn)
+        body = out["model.dsm"]
+        self.assertIn("uint32 count = 3;", body)                 # primitive incl. its default's type
+        self.assertIn("map<uint32, set<int32>>", body)           # nested primitive AND nested composite
+        self.assertIn("N::B a;", body)                           # named -> fully qualified
+        self.assertIn("vector<N::B> many;", body)
+        self.assertNotIn("struct A {", body)                     # the engine drops the transformed decl
 
 
 if __name__ == "__main__":

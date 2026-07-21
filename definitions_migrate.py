@@ -52,6 +52,28 @@ def _attachment_repr(identifier: str) -> str:
     return f"{namespace}::{identifier.rsplit('.', 1)[-1]}"
 
 
+_ELEM_CAST = {"optional": V.TypeOptional, "vector": V.TypeVector, "set": V.TypeSet,
+              "xarray": V.TypeXArray, "key": V.TypeKey}
+
+
+def _walk_type(t, acc: dict) -> None:
+    """Record ``{runtimeId -> FQN representation}`` for ``t`` and every nested sub-type. The
+    transform_type directive keys its source by runtimeId (the engine's storage key); the source
+    layer is name-based, so this bridges a runtimeId back to the FQN a codemod matches on."""
+    acc.setdefault(t.runtime_id().representation(), t.representation())
+    tc = t.type_code()
+    if tc in _ELEM_CAST:
+        _walk_type(_ELEM_CAST[tc].cast(t).element_type(), acc)
+    elif tc == "map":
+        m = V.TypeMap.cast(t)
+        _walk_type(m.key_type(), acc)
+        _walk_type(m.element_type(), acc)
+    elif tc in ("tuple", "variant"):
+        cast = V.TypeTuple if tc == "tuple" else V.TypeVariant
+        for x in cast.cast(t).types():
+            _walk_type(x, acc)
+
+
 # -- span resolution: a global (content) offset -> (file, local offset) ----------------
 
 def _line_starts(text: str) -> list[int]:
@@ -285,6 +307,31 @@ def _derive(directives, source_map, resolve, files, rewriter, source_defs) -> li
             replacement = (tgt_ns + "::" + tgt_simple) if "::" in original else tgt_simple
         if replacement != original:
             edits.append(_Edit(src_file, start, stop, replacement))
+
+    # transform_type: a GLOBAL type substitution (source -> new_type, at every occurrence incl.
+    # nested). The directive keys the source by runtimeId (engine storage); the source layer is
+    # FQN, so bridge runtimeId -> FQN via source_defs' types, then rewrite each type OCCURRENCE
+    # whose FQN matches (source_map.types() spans the whole expression, composites included). A
+    # nested source's inner occurrence lands inside the outer replacement — overlap resolution
+    # keeps the outer one. A named source's declaration is dropped by the engine (hooked), so cut it.
+    if directives.transformed_types:
+        rid_to_fqn: dict = {}
+        for named in (*source_defs.structures(), *source_defs.enumerations()):
+            rid_to_fqn[named.runtime_id().representation()] = named.representation()
+        for s in source_defs.structures():
+            for f in s.fields():
+                _walk_type(f.type(), rid_to_fqn)
+        fqn_to_new = {rid_to_fqn[rid]: new_type.representation()
+                      for rid, (new_type, _fn) in directives.transformed_types.items()
+                      if rid in rid_to_fqn}
+        for occ in source_map.types():
+            new_fqn = fqn_to_new.get(occ.representation())
+            if new_fqn is not None:
+                src, start, stop = resolve(occ.span())
+                edits.append(_Edit(src, start, stop, new_fqn))
+        for fqn in fqn_to_new:                                # a named source's declaration is dropped
+            if fqn in decl:
+                edit(decl[fqn].block_span(), "", tidy=True)
 
     # field rename
     for struct_repr, renames in directives.field_renames.items():
@@ -673,11 +720,10 @@ def _parse(files: dict[str, str], source_map=None):
     return builder, report, definitions
 
 
-# directives this codemod does not yet patch — refused up front (fail closed and early,
-# the project's north star) rather than left to the digest oracle to reject after the fact.
-_UNSUPPORTED = {
-    "transformed_types": "transform_type",   # a global value hook — a whole-tree reference sweep
-}
+# Every TransformationDirectives edit now has a source-patch; the whole surface is covered.
+# The guard stays (empty) as the fail-closed seam: a directive added upstream lands here first,
+# refused up front rather than left to the digest oracle to reject after the fact.
+_UNSUPPORTED: dict[str, str] = {}
 
 
 def _refuse_unsupported(directives):
