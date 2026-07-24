@@ -2,4 +2,4 @@
 
 # dsviper runtime + Python binding. >= 1.2.20 for ValueXArray.rebuild_from,
 # which the XArray rewrite path relies on.
-dsviper>=1.2.20
+dsviper>=1.2.23
