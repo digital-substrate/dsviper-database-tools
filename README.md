@@ -58,7 +58,7 @@ The runtime `dsviper` is on PyPI; this tool is not published. Install the runtim
 this repo, and run the script from the repo — the same shape as `dsviper-tools`:
 
 ```bash
-pip install "dsviper>=1.2.20"
+pip install "dsviper>=1.2.23,<2"
 git clone <repo> dsviper-database-tools
 cd dsviper-database-tools
 python3 database_migrate.py <migration> <source> <target>
@@ -246,3 +246,11 @@ merges included) over the 10 opcode verbs, in one atomic transaction that rolls 
 and verifies itself end to end (every opcode correctly rewritten, the DAG topology preserved). No
 dedicated directive yet — a Class-C hook expresses each today: `Vec`/`Mat` **reshape**, **variant
 arm retype**, and **aggregate** derivation over a *collection* of other documents.
+
+## Runtime dependency
+
+At runtime, this project depends on the `dsviper` Python package
+(distributed on PyPI), which is **proprietary** (license expression
+`LicenseRef-DigitalSubstrate-Commercial-1.2`). See
+[https://pypi.org/project/dsviper/](https://pypi.org/project/dsviper/)
+for the package's licensing posture and contact information.
