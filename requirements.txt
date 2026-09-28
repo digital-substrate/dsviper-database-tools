@@ -1,5 +1,5 @@
 # Runtime dependency for dsviper-database-tools.
 
-# dsviper runtime + Python binding. >= 1.2.20 for ValueXArray.rebuild_from,
-# which the XArray rewrite path relies on.
-dsviper>=1.2.23,<2
+# dsviper runtime + Python binding. >= 1.2.28 for the DSM source-map spans that
+# definitions_migrate edits at: a documented field's type, and a key<X> occurrence.
+dsviper>=1.2.28,<2

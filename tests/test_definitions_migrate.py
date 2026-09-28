@@ -7,10 +7,9 @@ engine: re-parse the patched tree and compare its `Definitions` digest to the en
 target. The `runtimeId` is a structure fingerprint (field defaults included), so an equal
 digest proves the patch faithful — that comparison is the assertion these tests rest on.
 
-The tool needs the parser's `DSMSourceMap` by-product (`dsviper >= 1.2.6`), which is newer
-than the shipped floor. Every test therefore live-probes the installed binding and skips
-cleanly where the source-map surface is absent, so the suite documents the contract without
-breaking on an older peer.
+The tool needs the parser's `DSMSourceMap` by-product (`dsviper >= 1.2.6`), and the spans it
+edits at are exact from `dsviper >= 1.2.28`, the shipped floor. Every test still live-probes
+the installed binding and skips cleanly where the source-map surface is absent.
 """
 
 import os
@@ -161,6 +160,21 @@ class DefinitionsMigrateTest(unittest.TestCase):
         out = self._run({"shop.dsm": SHOP, "catalog.dsm": CATALOG}, fn)
         self.assertIn("uint64 quantity;", out["shop.dsm"])
         self.assertNotIn("= 1", out["shop.dsm"])
+
+    def test_retype_keeps_the_doc_comment_of_the_field(self):
+        # The field's type span once started at its doc comment, so the retype rewrote the
+        # comment away with the type. The comment belongs to the field, not to its type.
+        shop = SHOP.replace("    uint16 legacy_code;",
+                            '    """The code of the previous system."""\n    uint16 legacy_code;')
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.retype_field("Shop::Order", "legacy_code", V.Type.UINT32)
+            return d
+        out = self._run({"shop.dsm": shop, "catalog.dsm": CATALOG}, fn)
+        self.assertIn('    """The code of the previous system."""\n    uint32 legacy_code;',
+                      out["shop.dsm"])
 
     def test_resize_vec_field(self):
         def fn(defs):
@@ -541,6 +555,30 @@ class DefinitionsMigrateTest(unittest.TestCase):
         self.assertIn("N::B a;", body)                           # named -> fully qualified
         self.assertIn("vector<N::B> many;", body)
         self.assertNotIn("struct A {", body)                     # the engine drops the transformed decl
+
+    def test_transform_type_rewrites_a_key_expression_whole(self):
+        # The span of a `key<X>` occurrence once started at the concept name, so a transform of
+        # the key type rewrote `Customer>` and left `key<` in front of the replacement.
+        model = ('namespace N {22222222-2222-2222-2222-222222222222} {\n\n'
+                 'concept Customer;\n'
+                 'concept Vendor;\n\n'
+                 'struct Order {\n'
+                 '    key<Customer> buyer;\n'
+                 '    vector<key<Customer>> referrals;\n'
+                 '};\n\n'
+                 '};\n')
+
+        def fn(defs):
+            from dsviper_database_tools import TransformationDirectives
+            customer = next(c for c in defs.concepts() if c.representation() == "N::Customer")
+            vendor = next(c for c in defs.concepts() if c.representation() == "N::Vendor")
+            d = TransformationDirectives()
+            d.transform_type(V.TypeKey(customer), V.TypeKey(vendor), lambda v, t: v)
+            return d
+        body = self._run({"model.dsm": model}, fn)["model.dsm"]
+        self.assertIn("key<N::Vendor> buyer;", body)
+        self.assertIn("vector<key<N::Vendor>> referrals;", body)
+        self.assertNotIn("key<key<", body)
 
     def test_dropped_type_still_named_by_a_pool_is_refused_up_front(self):
         # A pool declares no storage, so the engine never sees one — but a signature names types,

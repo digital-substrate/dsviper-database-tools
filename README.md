@@ -58,7 +58,7 @@ The runtime `dsviper` is on PyPI; this tool is not published. Install the runtim
 this repo, and run the script from the repo — the same shape as `dsviper-tools`:
 
 ```bash
-pip install "dsviper>=1.2.23,<2"
+pip install "dsviper>=1.2.28,<2"
 git clone <repo> dsviper-database-tools
 cd dsviper-database-tools
 python3 database_migrate.py <migration> <source> <target>

@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+- **Requires `dsviper >= 1.2.28`.** Two source-map spans were wrong before it: a documented
+  field's type span started at its doc comment, so `retype_field` deleted the comment, and a
+  `key<X>` occurrence's span started at the concept name, so `transform_type` rewrote
+  `Customer>` and left `key<` in front. The tool compensated for neither; two tests now hold
+  both.
+
 ## [0.2.4] - 2026-07-18
 
 Internal refactor, no behaviour change — hardening surfaced by the engine ↔ `REWRITE.md` review.
