@@ -127,6 +127,21 @@ class DefinitionsMigrateTest(unittest.TestCase):
         out = self._run({"shop.dsm": SHOP, "catalog.dsm": CATALOG}, fn)
         self.assertIn("uint32 qty = 1;", out["shop.dsm"])       # the default rides the rename
 
+    def test_a_rename_past_a_character_above_ffff_lands_on_the_name(self):
+        # A Python str indexes code points: a documentation with an emoji before the field must
+        # not shift the edit.
+        shop = ('namespace Shop {00000000-0000-0000-0000-0000000000a1} {\n\n"""A customer \U0001F600."""\n'
+                'struct Customer {\n  string fullname;\n};\n\n};\n')
+
+        def directives(_):
+            from dsviper_database_tools import TransformationDirectives
+            d = TransformationDirectives()
+            d.rename_field("Shop::Customer", "fullname", "full_name")
+            return d
+
+        out = self._run({"shop.dsm": shop}, directives)
+        self.assertIn("  string full_name;", out["shop.dsm"])
+
     def test_rename_case(self):
         def fn(defs):
             from dsviper_database_tools import TransformationDirectives
